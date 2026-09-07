@@ -1,0 +1,61 @@
+# examples/CMakeLists.txt
+# Two small binaries that show how to consume the TextFabric library.
+
+# ── generate_template — uses libzip directly (no textfabric dependency) ────
+add_executable(generate_template generate_template.cpp)
+target_link_libraries(generate_template PRIVATE libzip::zip)
+
+# ── basic_report — uses the textfabric public API only ────────────────────
+add_executable(basic_report basic_report.cpp)
+target_link_libraries(basic_report PRIVATE TextFabric::textfabric)
+
+# Place example binaries + the generated template together so running
+# `./basic_report` out-of-the-box just works.
+set_target_properties(generate_template basic_report PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+)
+
+# ── Windows: copy textfabric.dll (and its transitive runtime DLLs) ────────
+# next to every example executable so they run out-of-the-box without
+# touching PATH. No-op on Linux/macOS: rpath handles shared-lib lookup there.
+if(WIN32 AND TEXTFABRIC_BUILD_SHARED)
+    foreach(_tf_example basic_report)
+        add_custom_command(TARGET ${_tf_example} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:${_tf_example}>
+                    $<TARGET_FILE_DIR:${_tf_example}>
+            COMMAND_EXPAND_LISTS
+            COMMENT "Copying runtime DLLs next to ${_tf_example}"
+        )
+    endforeach()
+endif()
+
+# Generate the sample template.docx at build time so users can immediately
+# run ./basic_report template.docx report.docx without any extra steps.
+add_custom_command(
+    OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/template.docx"
+    COMMAND generate_template "${CMAKE_CURRENT_BINARY_DIR}/template.docx"
+    DEPENDS generate_template
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    COMMENT "Generating examples/template.docx"
+    VERBATIM
+)
+
+# Copy the committed sample logo.png next to the binaries so basic_report
+# can embed it out-of-the-box. The file is tracked in git (75 bytes) — see
+# examples/logo.png. POST_BUILD-on-basic_report ensures it lands whenever
+# someone rebuilds the binary.
+add_custom_command(
+    OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/logo.png"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/logo.png"
+            "${CMAKE_CURRENT_BINARY_DIR}/logo.png"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/logo.png"
+    COMMENT "Copying examples/logo.png to build dir"
+    VERBATIM
+)
+
+add_custom_target(example_template ALL
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/template.docx"
+            "${CMAKE_CURRENT_BINARY_DIR}/logo.png"
+)

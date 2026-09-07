@@ -1,0 +1,97 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "_base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE":              "Release",
+        "TEXTFABRIC_BUILD_SHARED":       "ON",
+        "TEXTFABRIC_BUILD_TESTS":        "ON",
+        "TEXTFABRIC_USE_FETCHCONTENT":   "ON"
+      }
+    },
+
+    {
+      "name": "linux-x64",
+      "inherits": "_base",
+      "displayName": "Linux x64 (SHARED, .so)",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+
+    {
+      "name": "macos-arm64",
+      "inherits": "_base",
+      "displayName": "macOS arm64 (SHARED, .dylib)",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES":       "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET":   "11.0"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+    },
+
+    {
+      "name": "win-x64-vcpkg",
+      "inherits": "_base",
+      "displayName": "Windows x64 MSVC (SHARED, .dll) via vcpkg",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE":         "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET":         "x64-windows",
+        "TEXTFABRIC_USE_FETCHCONTENT":  "OFF"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+
+    {
+      "name": "win-x86-vcpkg",
+      "inherits": "_base",
+      "displayName": "Windows x86 MSVC (SHARED, .dll) via vcpkg",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "Win32",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE":         "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET":         "x86-windows",
+        "TEXTFABRIC_USE_FETCHCONTENT":  "OFF"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+
+    {
+      "name": "win-x64-mingw-cross",
+      "inherits": "_base",
+      "displayName": "Windows x64 (cross-compile from Linux via mingw-w64)",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-w64-x86_64.cmake",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+
+    {
+      "name": "win-x86-mingw-cross",
+      "inherits": "_base",
+      "displayName": "Windows x86 (cross-compile from Linux via mingw-w64)",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-w64-i686.cmake",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "linux-x64",          "configurePreset": "linux-x64",          "jobs": 0 },
+    { "name": "macos-arm64",        "configurePreset": "macos-arm64",        "jobs": 0 },
+    { "name": "win-x64-vcpkg",      "configurePreset": "win-x64-vcpkg",      "configuration": "Release" },
+    { "name": "win-x86-vcpkg",      "configurePreset": "win-x86-vcpkg",      "configuration": "Release" },
+    { "name": "win-x64-mingw-cross","configurePreset": "win-x64-mingw-cross","jobs": 0 },
+    { "name": "win-x86-mingw-cross","configurePreset": "win-x86-mingw-cross","jobs": 0 }
+  ],
+
+  "testPresets": [
+    { "name": "linux-x64",     "configurePreset": "linux-x64",     "output": { "outputOnFailure": true } },
+    { "name": "macos-arm64",   "configurePreset": "macos-arm64",   "output": { "outputOnFailure": true } },
+    { "name": "win-x64-vcpkg", "configurePreset": "win-x64-vcpkg", "output": { "outputOnFailure": true } },
+    { "name": "win-x86-vcpkg", "configurePreset": "win-x86-vcpkg", "output": { "outputOnFailure": true } }
+  ]
+}

@@ -1,0 +1,204 @@
+# ───────────────────────────────────────────────────────────────────────────
+#  Build outputs
+# ───────────────────────────────────────────────────────────────────────────
+build/
+build-*/
+out/
+cmake-build-*/
+install/
+bin/
+lib/
+
+# ───────────────────────────────────────────────────────────────────────────
+#  CMake
+# ───────────────────────────────────────────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+_deps/
+
+# Per-developer preset overrides (user-specific — NOT committed)
+CMakeUserPresets.json
+
+# Generated export header (emitted into build dir, but just in case)
+textfabric/export.h
+
+# Ninja
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Compiled objects, libraries, executables
+# ───────────────────────────────────────────────────────────────────────────
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.exp
+*.lo
+*.la
+*.slo
+
+# Debug symbols
+*.pdb
+*.idb
+*.ilk
+*.dSYM/
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Dependency files
+*.d
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Package managers
+# ───────────────────────────────────────────────────────────────────────────
+# vcpkg (manifest mode installs into build/vcpkg_installed but keep a guard)
+vcpkg_installed/
+vcpkg/
+
+# Nix build outputs (symlinks)
+result
+result-*
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Compile databases / LSP caches
+# ───────────────────────────────────────────────────────────────────────────
+compile_commands.json
+.cache/                # clangd cache
+.clangd/
+
+# ───────────────────────────────────────────────────────────────────────────
+#  IDEs
+# ───────────────────────────────────────────────────────────────────────────
+# VS Code (keep .vscode/settings.json if you want — gitignored by default)
+.vscode/
+*.code-workspace
+
+# JetBrains (CLion, etc.)
+.idea/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# Eclipse / Sublime
+.project
+.cproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Editor temp / swap files
+# ───────────────────────────────────────────────────────────────────────────
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+.#*
+\#*\#
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Operating systems
+# ───────────────────────────────────────────────────────────────────────────
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.stackdump
+
+# Linux
+.directory
+.Trash-*
+.fuse_hidden*
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Testing / coverage
+# ───────────────────────────────────────────────────────────────────────────
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.info
+*.profraw
+*.profdata
+lcov.info
+
+# Sanitizer / leak reports
+*.tsan
+*.asan
+*.ubsan
+core
+core.*
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Profiling
+# ───────────────────────────────────────────────────────────────────────────
+callgrind.out.*
+cachegrind.out.*
+massif.out.*
+perf.data
+perf.data.old
+gmon.out
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Logs
+# ───────────────────────────────────────────────────────────────────────────
+*.log
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Secrets / local config  (anything sensitive must NOT be committed)
+# ───────────────────────────────────────────────────────────────────────────
+.env
+.env.local
+*.pem
+*.key
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Project-specific
+# ───────────────────────────────────────────────────────────────────────────
+# Temporary .docx fixtures generated at test-time (tests use OS tmp dir,
+# but keep a guard against stray files in repo root).
+/tmp_*.docx
+/*_out.docx
+
+# Generated/output .docx from running the examples — not source.
+/report.docx
