@@ -9,12 +9,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <regex>
 #include <sstream>
+#include <vector>
 
 namespace textfabric::docx {
 
@@ -386,6 +388,126 @@ std::filesystem::path make_scratch_dir() {
     return dir;
 }
 
+// Encode raw bytes as base64 (RFC 4648, standard alphabet, padded).
+std::string base64_encode(const std::string& data) {
+    static constexpr char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+
+    std::size_t i = 0;
+    const std::size_t n = data.size();
+    for (; i + 3 <= n; i += 3) {
+        const std::uint32_t chunk =
+            (static_cast<std::uint8_t>(data[i]) << 16) |
+            (static_cast<std::uint8_t>(data[i + 1]) << 8) |
+            static_cast<std::uint8_t>(data[i + 2]);
+        out.push_back(table[(chunk >> 18) & 0x3F]);
+        out.push_back(table[(chunk >> 12) & 0x3F]);
+        out.push_back(table[(chunk >> 6) & 0x3F]);
+        out.push_back(table[chunk & 0x3F]);
+    }
+
+    const std::size_t remaining = n - i;
+    if (remaining == 1) {
+        const std::uint32_t chunk = static_cast<std::uint32_t>(
+            static_cast<std::uint8_t>(data[i])) << 16;
+        out.push_back(table[(chunk >> 18) & 0x3F]);
+        out.push_back(table[(chunk >> 12) & 0x3F]);
+        out.push_back('=');
+        out.push_back('=');
+    } else if (remaining == 2) {
+        const std::uint32_t chunk =
+            (static_cast<std::uint32_t>(static_cast<std::uint8_t>(data[i])) << 16) |
+            (static_cast<std::uint32_t>(static_cast<std::uint8_t>(data[i + 1])) << 8);
+        out.push_back(table[(chunk >> 18) & 0x3F]);
+        out.push_back(table[(chunk >> 12) & 0x3F]);
+        out.push_back(table[(chunk >> 6) & 0x3F]);
+        out.push_back('=');
+    }
+    return out;
+}
+
+// Read the entirety of a file into a string, in binary mode.
+std::string read_file_bytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+}
+
+// MIME type to use when embedding `bytes` (the contents of `path`) as a
+// data: URI. `image.hpp`'s detect_format() only recognizes the formats
+// TextFabric can re-encode for DOCX embedding (PNG/JPEG/BMP/TIFF); it
+// doesn't know GIF, SVG or WebP, all of which LibreOffice's HTML/chart
+// export can still produce as sibling files. Sniff those separately by
+// magic bytes before falling back to the file extension.
+std::string sniff_data_uri_mime(const std::filesystem::path& path,
+                                 const std::string& bytes) {
+    switch (detect_format(path)) {
+        case ImageFormat::Png:  return "image/png";
+        case ImageFormat::Jpeg: return "image/jpeg";
+        case ImageFormat::Bmp:  return "image/bmp";
+        case ImageFormat::Tiff: return "image/tiff";
+        default: break;
+    }
+
+    if (bytes.size() >= 6 &&
+        (bytes.compare(0, 6, "GIF87a") == 0 || bytes.compare(0, 6, "GIF89a") == 0)) {
+        return "image/gif";
+    }
+    if (bytes.size() >= 12 && bytes.compare(0, 4, "RIFF") == 0 &&
+        bytes.compare(8, 4, "WEBP") == 0) {
+        return "image/webp";
+    }
+
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](unsigned char c) { return std::tolower(c); });
+    if (ext == ".svg") return "image/svg+xml";
+    if (ext == ".png") return "image/png";
+    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+    if (ext == ".gif") return "image/gif";
+    if (ext == ".bmp") return "image/bmp";
+    if (ext == ".webp") return "image/webp";
+
+    return "application/octet-stream";
+}
+
+// LibreOffice's HTML export writes referenced images as sibling files next
+// to `html_path` (e.g. "output_html_....png") instead of embedding them —
+// <img src="..."> in the produced HTML points at those bare filenames.
+// Rewrite `html_path` in place so every such reference becomes an inline
+// base64 data: URI, making the HTML self-contained. `siblings` is consumed
+// only for its bytes; callers are still responsible for deleting the files.
+void inline_sibling_images(const std::filesystem::path& html_path,
+                            const std::vector<std::filesystem::path>& siblings) {
+    if (siblings.empty()) return;
+
+    std::string html = read_file_bytes(html_path);
+
+    for (const auto& sibling : siblings) {
+        const std::string bytes = read_file_bytes(sibling);
+        const std::string data_uri =
+            fmt::format("data:{};base64,{}",
+                        sniff_data_uri_mime(sibling, bytes),
+                        base64_encode(bytes));
+
+        const std::string needle = "\"" + sibling.filename().string() + "\"";
+        const std::string replacement = "\"" + data_uri + "\"";
+        std::size_t pos = 0;
+        while ((pos = html.find(needle, pos)) != std::string::npos) {
+            html.replace(pos, needle.size(), replacement);
+            pos += replacement.size();
+        }
+    }
+
+    std::ofstream out(html_path, std::ios::binary | std::ios::trunc);
+    out.write(html.data(), static_cast<std::streamsize>(html.size()));
+}
+
 } // namespace
 
 void DocxMerger::save(const std::string& path) {
@@ -466,31 +588,20 @@ void DocxMerger::save(const std::string& path) {
 
         // LibreOffice's HTML export writes referenced images as sibling
         // files next to `produced` inside `scratch` (e.g.
-        // "output_html_....png") instead of embedding them — <img src="...">
-        // in the produced HTML points at those bare filenames. Relocate
-        // every such extra file next to the final target before `scratch`
-        // is wiped, so the relative references still resolve after the
-        // move below. PDF conversion has no siblings, so this loop is a
-        // no-op for ".pdf".
-        const std::filesystem::path target_dir =
-            p.has_parent_path() ? p.parent_path() : std::filesystem::path(".");
+        // "output_html_....png") instead of embedding them. Inline every
+        // such file into `produced` as a base64 data: URI so the final
+        // HTML is self-contained; the siblings themselves are discarded
+        // with the rest of `scratch` below. PDF conversion has no
+        // siblings, so this is a no-op for ".pdf".
         std::error_code list_ec;
+        std::vector<std::filesystem::path> siblings;
         for (const auto& entry :
              std::filesystem::directory_iterator(scratch, list_ec)) {
             if (!entry.is_regular_file()) continue;
             if (entry.path() == produced || entry.path() == scratch_docx) continue;
-
-            const std::filesystem::path sibling_dest =
-                target_dir / entry.path().filename();
-            std::error_code sibling_ec;
-            std::filesystem::remove(sibling_dest, sibling_ec);
-            std::filesystem::rename(entry.path(), sibling_dest, sibling_ec);
-            if (sibling_ec) {
-                std::filesystem::copy_file(
-                    entry.path(), sibling_dest,
-                    std::filesystem::copy_options::overwrite_existing, sibling_ec);
-            }
+            siblings.push_back(entry.path());
         }
+        inline_sibling_images(produced, siblings);
 
         // Move into place. Cross-device move is possible (tmp on a different
         // filesystem than the target) so fall back to copy.
