@@ -464,6 +464,34 @@ void DocxMerger::save(const std::string& path) {
                             conv_label, produced.string()));
         }
 
+        // LibreOffice's HTML export writes referenced images as sibling
+        // files next to `produced` inside `scratch` (e.g.
+        // "output_html_....png") instead of embedding them — <img src="...">
+        // in the produced HTML points at those bare filenames. Relocate
+        // every such extra file next to the final target before `scratch`
+        // is wiped, so the relative references still resolve after the
+        // move below. PDF conversion has no siblings, so this loop is a
+        // no-op for ".pdf".
+        const std::filesystem::path target_dir =
+            p.has_parent_path() ? p.parent_path() : std::filesystem::path(".");
+        std::error_code list_ec;
+        for (const auto& entry :
+             std::filesystem::directory_iterator(scratch, list_ec)) {
+            if (!entry.is_regular_file()) continue;
+            if (entry.path() == produced || entry.path() == scratch_docx) continue;
+
+            const std::filesystem::path sibling_dest =
+                target_dir / entry.path().filename();
+            std::error_code sibling_ec;
+            std::filesystem::remove(sibling_dest, sibling_ec);
+            std::filesystem::rename(entry.path(), sibling_dest, sibling_ec);
+            if (sibling_ec) {
+                std::filesystem::copy_file(
+                    entry.path(), sibling_dest,
+                    std::filesystem::copy_options::overwrite_existing, sibling_ec);
+            }
+        }
+
         // Move into place. Cross-device move is possible (tmp on a different
         // filesystem than the target) so fall back to copy.
         std::filesystem::remove(p, cleanup_ec);
@@ -535,11 +563,13 @@ DocxMerger::find_bookmark_starts(const std::string& name) const {
 //   1. Find the <w:bookmarkStart w:name="..."> node matching `bookmark`.
 //   2. Walk forward in document order (up to the matching <w:bookmarkEnd>)
 //      collecting <w:t> nodes.
-//   3. Concatenate their text; if `field` appears as a substring, replace
-//      the first occurrence. Redistribute the result:
-//        - write the whole replaced text into the first <w:t>, then
-//        - clear the remaining <w:t>s that held the tail of `field`.
-//      This preserves run-property formatting (the <w:rPr> on the first run).
+//   3. Concatenate their text; replace every occurrence of `field` (not
+//      just the first — Word can duplicate the same run inside
+//      mc:AlternateContent for old-Word compatibility). Redistribute each
+//      match: write its own prefix + value into the node it starts in,
+//      clear any nodes it fully consumes, and keep the suffix of the node
+//      it ends in. This preserves run-property formatting (the <w:rPr> on
+//      the first run of each match).
 //
 // This is intentionally conservative — it handles both `kFIELD`-style
 // and `{{field}}` placeholders inside a single bookmark.
@@ -626,20 +656,57 @@ void ensure_xml_space_preserve(pugi::xml_node t, const std::string& text) {
     attr.set_value("preserve");
 }
 
-// Replace the first occurrence of `field` across the concatenated text of
-// `texts` with `value`. Only the <w:t> nodes that actually contributed to
-// the matched substring are rewritten: the first affected node receives
-// its own prefix + `value`, the last receives its own suffix, any
-// fully-consumed intermediates are cleared. Text nodes outside the match
-// span (including ones that belong to unrelated overlapping bookmarks) are
-// left byte-for-byte untouched. Returns true when a replacement happened.
+// Find every non-overlapping occurrence of `field` in `joined`, left to
+// right, skipping any candidate that isn't a real match. A plain substring
+// search would match a bare field name (e.g. "kUser") inside the braced
+// form of a different placeholder ("{kUser}"), replacing only the letters
+// and leaving the original braces stranded around the new value — so skip
+// a candidate wrapped in '{'/'}' unless `field` itself already includes
+// those braces. Word can also duplicate the same run twice within one part
+// (e.g. mc:Choice / mc:Fallback content for old-Word compatibility), so a
+// single first-match search misses the second copy entirely — collect all
+// of them instead.
+std::vector<std::pair<std::size_t, std::size_t>>
+find_field_tokens(const std::string& joined, const std::string& field) {
+    const bool field_is_braced =
+        field.size() >= 2 && field.front() == '{' && field.back() == '}';
+
+    std::vector<std::pair<std::size_t, std::size_t>> matches;
+    std::size_t search_from = 0;
+    while (true) {
+        const auto pos = joined.find(field, search_from);
+        if (pos == std::string::npos) break;
+
+        const bool wrapped_in_braces =
+            !field_is_braced &&
+            pos > 0 && joined[pos - 1] == '{' &&
+            pos + field.size() < joined.size() && joined[pos + field.size()] == '}';
+        if (wrapped_in_braces) {
+            search_from = pos + 1;
+            continue;
+        }
+
+        matches.emplace_back(pos, pos + field.size());
+        search_from = pos + field.size();
+    }
+    return matches;
+}
+
+// Replace every occurrence of `field` across the concatenated text of
+// `texts` with `value`. For each match, only the <w:t> nodes it actually
+// spans are rewritten: the node the match starts in receives its own
+// untouched prefix + `value`, the node it ends in keeps its own untouched
+// suffix, and any nodes fully consumed by the match are cleared. Nodes no
+// match touches (including ones belonging to unrelated overlapping
+// bookmarks) are left byte-for-byte untouched. Returns true when at least
+// one replacement happened.
 bool replace_placeholder_in(std::vector<pugi::xml_node>& texts,
                             const std::string& field,
                             const std::string& value) {
     if (texts.empty()) return false;
 
     // Record where each contributor starts in the joined string so we can
-    // map the match back to individual nodes later.
+    // map matches back to individual nodes later.
     std::string joined;
     std::vector<std::size_t> offsets;
     offsets.reserve(texts.size());
@@ -648,35 +715,38 @@ bool replace_placeholder_in(std::vector<pugi::xml_node>& texts,
         joined += t.text().get();
     }
 
-    const auto pos = joined.find(field);
-    if (pos == std::string::npos) return false;
-    const auto end = pos + field.size();
+    const auto matches = find_field_tokens(joined, field);
+    if (matches.empty()) return false;
 
     auto node_end = [&](std::size_t i) {
         return (i + 1 < offsets.size()) ? offsets[i + 1] : joined.size();
     };
 
-    std::size_t first = 0;
-    while (first + 1 < texts.size() && node_end(first) <= pos) ++first;
-    std::size_t last = first;
-    while (last + 1 < texts.size() && node_end(last) < end) ++last;
+    for (std::size_t i = 0; i < texts.size(); ++i) {
+        const std::size_t start_i = offsets[i];
+        const std::size_t end_i   = node_end(i);
+        const std::string original = texts[i].text().get();
 
-    const std::string prefix = joined.substr(offsets[first], pos - offsets[first]);
-    const std::string suffix = joined.substr(end, node_end(last) - end);
+        std::string new_text;
+        std::size_t cursor = start_i;
+        bool touched = false;
 
-    if (first == last) {
-        const std::string combined = prefix + value + suffix;
-        texts[first].text().set(combined.c_str());
-        ensure_xml_space_preserve(texts[first], combined);
-    } else {
-        const std::string first_text = prefix + value;
-        texts[first].text().set(first_text.c_str());
-        ensure_xml_space_preserve(texts[first], first_text);
-        for (std::size_t i = first + 1; i < last; ++i) {
-            texts[i].text().set("");
+        for (const auto& [m_start, m_end] : matches) {
+            if (m_end <= start_i) continue;   // entirely before this node
+            if (m_start >= end_i) break;      // entirely after (matches are sorted)
+            touched = true;
+
+            const std::size_t seg_start = std::max(m_start, start_i);
+            const std::size_t seg_end   = std::min(m_end, end_i);
+            new_text += original.substr(cursor - start_i, seg_start - cursor);
+            if (m_start >= start_i) new_text += value;  // match starts in this node
+            cursor = seg_end;
         }
-        texts[last].text().set(suffix.c_str());
-        ensure_xml_space_preserve(texts[last], suffix);
+        if (!touched) continue;
+
+        new_text += original.substr(cursor - start_i);
+        texts[i].text().set(new_text.c_str());
+        ensure_xml_space_preserve(texts[i], new_text);
     }
     return true;
 }
@@ -799,6 +869,34 @@ void DocxMerger::setClipboardValue(const std::string& bookmark,
         throw ReportException(
             ReportError::InvalidField,
             fmt::format("field '{}' not found in bookmark '{}'", field, bookmark));
+    }
+}
+
+bool DocxMerger::hasBookmark(const std::string& bookmark) const {
+    if (!loaded_) return false;
+    return !find_bookmark_starts(bookmark).empty();
+}
+
+void DocxMerger::clearBookmark(const std::string& bookmark) {
+    if (!loaded_) {
+        throw ReportException(ReportError::CantOpenTemplate,
+                              "clearBookmark before load()");
+    }
+
+    const auto starts = find_bookmark_starts(bookmark);
+    if (starts.empty()) {
+        throw ReportException(
+            ReportError::InvalidBookmark,
+            fmt::format("bookmark not found: {}", bookmark));
+    }
+
+    // Blank every <w:t> the bookmark spans — same span collect_text_nodes_in_bookmark
+    // uses for setClipboardValue, so a template that round-trips through
+    // setClipboardValue round-trips through clearBookmark too.
+    for (auto bmk : starts) {
+        for (auto t : collect_text_nodes_in_bookmark(bmk)) {
+            t.text().set("");
+        }
     }
 }
 

@@ -63,6 +63,30 @@ public:
                                    const std::string& field,
                                    const std::string& value) = 0;
 
+    /// Query whether a bookmark with this exact name exists in the loaded
+    /// template. Returns false both when the template has none and when no
+    /// template is loaded yet — never throws. Use it to validate a
+    /// template's bookmark set up front, or to build a diagnostic list of
+    /// bookmarks a report run never touched.
+    ///
+    /// Does not resolve "_Header"/"_Footer" pseudo-bookmarks (see
+    /// setClipboardValue above) — those aren't backed by a real
+    /// `<w:bookmarkStart>` to look up.
+    [[nodiscard]] virtual bool hasBookmark(const std::string& bookmark) const = 0;
+
+    /// Erase the placeholder text inside a bookmark, leaving it empty.
+    ///
+    /// Use this for a bookmark the caller has decided not to fill on this
+    /// run (e.g. an optional section with no data for it) — without an
+    /// explicit call to either this or setClipboardValue, the original
+    /// template placeholder text (including literal "{field}" tokens)
+    /// survives untouched into the saved document.
+    ///
+    /// Does not resolve "_Header"/"_Footer" pseudo-bookmarks — see
+    /// setClipboardValue above.
+    /// Throws ReportException{InvalidBookmark}.
+    virtual void clearBookmark(const std::string& bookmark) = 0;
+
     /// Clone a table row and fill its cells.
     ///
     /// The bookmark must live inside a `<w:tr>` template row that serves as
@@ -114,8 +138,25 @@ public:
                           const std::filesystem::path& image_path,
                           const ImageSize& bounds = {}) = 0;
 
-    /// Update a numeric value inside an embedded chart.
-    /// v1: not implemented — throws ReportException{NotImplemented}.
+    /// Overwrite the value at an existing (series, category) point inside
+    /// an embedded chart anchored at `bookmark`. `field` is accepted for
+    /// API compatibility but not used for matching.
+    ///
+    /// This only rewrites a point that's already in the chart's data
+    /// cache — it cannot add or remove a category or series. The chart's
+    /// category axis and series set are whatever the template's author
+    /// laid out in Excel; if the number of categories is only known at
+    /// runtime and doesn't match the template, calls for the missing
+    /// categories throw InvalidField. There's no API here to replace the
+    /// axis/series shape itself — only to update values already on it.
+    ///
+    /// Throws ReportException:
+    ///   - InvalidBookmark: bookmark not found, not in a <w:p>, or that
+    ///                      paragraph has no chart
+    ///   - InvalidField:    `series` or `category` don't exist in the chart
+    ///   - NotImplemented:  chart is scatter/bubble/stock/surface — only
+    ///                      cat/val shapes (bar/line/pie/area/radar/
+    ///                      doughnut/3D variants) are supported
     virtual void setChartValue(const std::string& bookmark,
                                const std::string& field,
                                const std::string& series,
@@ -130,6 +171,6 @@ public:
 };
 
 /// Factory: builds a DOCX-backed merger.
-TEXTFABRIC_API [[nodiscard]] std::unique_ptr<IReportMerger> make_docx_merger();
+[[nodiscard]] TEXTFABRIC_API std::unique_ptr<IReportMerger> make_docx_merger();
 
 } // namespace textfabric

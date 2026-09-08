@@ -33,6 +33,9 @@ public:
                            const std::string& field,
                            const std::string& value) override;
 
+    [[nodiscard]] bool hasBookmark(const std::string& bookmark) const override;
+    void clearBookmark(const std::string& bookmark) override;
+
     void setTableRow(const std::string& bookmark,
                      const std::vector<std::string>& fields,
                      const std::vector<std::vector<std::string>>& rows) override;

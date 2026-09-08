@@ -100,7 +100,10 @@ if(NOT libzip_FOUND)
 endif()
 
 # ── nlohmann_json ────────────────────────────────────────────────────────────
-find_package(nlohmann_json CONFIG QUIET)
+# Version-gated: the namespaced nlohmann_json::nlohmann_json target we link
+# against below only exists from 3.2.0 on — older packages only expose the
+# bare, un-namespaced target.
+find_package(nlohmann_json 3.2.0 CONFIG QUIET)
 _tf_dep_status("nlohmann_json" nlohmann_json_FOUND)
 
 if(NOT nlohmann_json_FOUND)
@@ -149,7 +152,29 @@ if(NOT inja_FOUND)
         set(INJA_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
         set(INJA_EXPORT           OFF CACHE BOOL "" FORCE)
         set(BUILD_BENCHMARK       OFF CACHE BOOL "" FORCE)
-        set(INJA_USE_EMBEDDED_JSON OFF CACHE BOOL "" FORCE)  # use our nlohmann_json, not inja's bundled copy
+
+        # inja's own CMakeLists.txt (checked at build/_deps/inja-src, v3.4.0):
+        # with INJA_USE_EMBEDDED_JSON=OFF, it does `if(TARGET nlohmann_json)
+        # install(TARGETS nlohmann_json ...)` — it assumes any target
+        # literally named `nlohmann_json` (no namespace) was defined locally
+        # via add_library (e.g. a git submodule) and is therefore
+        # installable. That holds when *we* FetchContent'd nlohmann_json
+        # above (its own CMakeLists.txt defines that exact target the same
+        # way), but not when find_package() resolved it to a package
+        # config's target instead (nixpkgs/vcpkg/...): several distros'
+        # nlohmann_jsonConfig.cmake also registers a bare `nlohmann_json`
+        # IMPORTED target for pre-3.2.0-style compatibility, and
+        # `install(TARGETS)` on an IMPORTED target is a hard CMake error —
+        # "given target ... which does not exist" — regardless of version.
+        #
+        # So only force the switch off in the FetchContent case. When
+        # find_package() already succeeded, leave inja's own default (ON)
+        # alone: its ON-branch calls find_package(nlohmann_json) itself,
+        # resolves to the very same package we already found, and never
+        # reaches the install(TARGETS) line at all.
+        if(NOT nlohmann_json_FOUND)
+            set(INJA_USE_EMBEDDED_JSON OFF CACHE BOOL "" FORCE)  # use our FetchContent'd nlohmann_json, not inja's bundled copy
+        endif()
         FetchContent_MakeAvailable(inja)
     else()
         message(WARNING "inja not found — stubs will compile without it.")
@@ -160,6 +185,12 @@ endif()
 # Single-header public domain library from https://github.com/nothings/stb.
 # vcpkg exposes it as `Stb::Stb` via find_package(Stb CONFIG); nix has `stb`
 # but without CMake config — so we FetchContent as a fallback.
+#
+# Offline/sandboxed builds (no network access for FetchContent's git clone):
+# point FETCHCONTENT_SOURCE_DIR_STB at a local checkout of the stb sources
+# and FetchContent_Populate below uses it directly instead of cloning. This
+# is a stock CMake FetchContent mechanism (works for any FetchContent_Declare
+# name), not something TextFabric implements itself.
 set(_tf_stb_include "")
 find_package(Stb QUIET)
 if(Stb_FOUND AND DEFINED Stb_INCLUDE_DIR)
@@ -182,7 +213,7 @@ elseif(TEXTFABRIC_USE_FETCHCONTENT)
         message(WARNING "  [dep] stb: FetchContent completed but stb_image.h not found — JPEG/BMP support disabled")
     endif()
 else()
-    message(STATUS "  [dep] stb: NOT found and FetchContent disabled — JPEG/BMP support disabled")
+    message(WARNING "  [dep] stb: NOT found and FetchContent disabled — JPEG/BMP support disabled; setImage() will throw NotImplemented for non-PNG input")
 endif()
 
 if(_tf_stb_include)

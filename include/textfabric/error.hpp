@@ -22,7 +22,7 @@ enum class ReportError : int {
     Unknown               = 99,
 };
 
-TEXTFABRIC_API [[nodiscard]] std::string_view to_string(ReportError e) noexcept;
+[[nodiscard]] TEXTFABRIC_API std::string_view to_string(ReportError e) noexcept;
 
 /// Exception thrown across the library boundary.
 /// External code should catch this and translate to its own error type.
