@@ -182,7 +182,12 @@ public:
     /// Set the chart's title text, replacing whatever the template author
     /// set in Excel/Word (including "no title" — autoTitleDeleted is
     /// cleared and a title element is created if the chart didn't have
-    /// one).
+    /// one). If the chart already had a title, its box formatting, first
+    /// run's font/color, and paragraph alignment carry over onto the new
+    /// text — only the string itself is replaced, not the styling. (A
+    /// title with several differently-formatted runs still collapses to
+    /// one run using the first run's style, since this call sets one
+    /// plain string.)
     ///
     /// Throws ReportException:
     ///   - InvalidBookmark: bookmark not found, not in a <w:p>, or that
@@ -192,8 +197,8 @@ public:
                                const std::string& title) = 0;
 
     /// Set the title text of the chart's category or value axis.
-    /// Same title-creation behavior as setChartTitle when the axis has no
-    /// title yet.
+    /// Same title-creation and formatting-preservation behavior as
+    /// setChartTitle when the axis already has a title, or has none yet.
     ///
     /// Throws ReportException:
     ///   - InvalidBookmark: bookmark not found, not in a <w:p>, or that
@@ -223,7 +228,11 @@ public:
     /// of them are reused in template order and restyled with the new
     /// name/data; if `series` has more entries than the template had series,
     /// the extra ones clone the last template series' style; if fewer, the
-    /// surplus template series are removed.
+    /// surplus template series are removed. Per-point color overrides the
+    /// template had on individual categories don't survive — they're keyed
+    /// to point indices from the old category axis, which have no
+    /// principled mapping onto a reshaped one, so every point falls back
+    /// to the chart's normal per-index theme-color rotation.
     ///
     /// When the chart carries an embedded workbook (word/embeddings/*.xlsx,
     /// linked via <c:externalData>), its backing worksheet is rewritten to

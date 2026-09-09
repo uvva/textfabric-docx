@@ -1706,6 +1706,39 @@ TEST_CASE("setChartTitle replaces an existing title instead of duplicating it",
     fs::remove(out);
 }
 
+TEST_CASE("setChartTitle preserves the template's existing title formatting",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_title_fmt_in",  ".docx");
+    const auto out = tmp_file("chart_title_fmt_out", ".docx");
+    tf_test::ChartFixture fx;
+    fx.initial_title = "Old Title";   // fixture styles this red/bold/14pt/centered/rotated
+    tf_test::write_chart_template_docx(in, fx);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartTitle("kStatChart", "New Title"));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto title = doc.child("c:chartSpace").child("c:chart").child("c:title");
+    auto rich  = title.child("c:tx").child("c:rich");
+    auto run   = rich.child("a:p").child("a:r");
+
+    REQUIRE(std::string(run.child_value("a:t")) == "New Title");
+    // The template's box/paragraph/run formatting survived the text swap.
+    REQUIRE(std::string(rich.child("a:bodyPr").attribute("rot").value()) == "5400000");
+    REQUIRE(std::string(rich.child("a:p").child("a:pPr").attribute("algn").value()) == "ctr");
+    REQUIRE(std::string(run.child("a:rPr").attribute("b").value()) == "1");
+    REQUIRE(std::string(run.child("a:rPr").attribute("sz").value()) == "1400");
+    REQUIRE(std::string(run.child("a:rPr").child("a:solidFill").child("a:srgbClr")
+                         .attribute("val").value()) == "FF0000");
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
 TEST_CASE("setChartTitle throws NotImplemented on scatter chart",
           "[merger][chart][error]") {
     const auto in = tmp_file("chart_title_scatter", ".docx");
@@ -1814,6 +1847,31 @@ TEST_CASE("setChartAxisTitle throws NotImplemented on scatter chart",
 }
 
 // ── setChartData ───────────────────────────────────────────────────────────
+
+TEST_CASE("setChartData clears a stale per-point <c:dPt> override on reshape",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_data_dpt_in",  ".docx");
+    const auto out = tmp_file("chart_data_dpt_out", ".docx");
+    tf_test::ChartFixture fx;
+    fx.with_series0_data_point_override = true;   // Sales/idx0 gets a <c:dPt>
+    tf_test::write_chart_template_docx(in, fx);
+
+    // Sanity: the fixture really does carry the override before we touch it.
+    REQUIRE(read_docx_part(in, "word/charts/chart1.xml").find("c:dPt") != std::string::npos);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartData(
+        "kStatChart", {"Q1", "Q2", "Q3"},
+        {{"Sales", {1, 2, 3}}, {"Costs", {4, 5, 6}}}));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    REQUIRE(xml.find("c:dPt") == std::string::npos);
+
+    fs::remove(in);
+    fs::remove(out);
+}
 
 TEST_CASE("setChartData reshapes to more categories than the template had",
           "[merger][chart]") {

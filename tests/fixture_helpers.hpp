@@ -42,6 +42,18 @@ struct ChartFixture {
     std::vector<std::string>          series_names    = {"Sales", "Costs"};
     std::vector<std::string>          category_names  = {"Q1",    "Q2"};
     std::vector<std::vector<double>>  data            = {{10, 20}, {5, 15}};
+
+    /// When non-empty, build_chart_xml() emits a <c:title> with this text,
+    /// styled with a distinctive <a:rPr>/<a:pPr>/<a:bodyPr> so a test can
+    /// assert that setChartTitle preserves the existing formatting instead
+    /// of just the new text.
+    std::string initial_title;
+
+    /// When true, series_names[0]'s <c:ser> gets a <c:dPt idx="0"> color
+    /// override — used to verify setChartData clears stale per-point
+    /// overrides on reshape instead of leaving them pointing at whatever
+    /// category now happens to sit at that index.
+    bool with_series0_data_point_override = false;
 };
 
 /// Minimal DOCX with one embedded chart. The bookmark `fx.bookmark_name`

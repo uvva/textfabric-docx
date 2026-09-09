@@ -148,8 +148,12 @@ std::string build_ser_cat_val(const ChartFixture& fx, std::size_t s_idx) {
        << "<c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache>"
        << "<c:ptCount val=\"1\"/>"
        << "<c:pt idx=\"0\"><c:v>" << fx.series_names[s_idx] << "</c:v></c:pt>"
-       << "</c:strCache></c:strRef></c:tx>"
-       << "<c:cat><c:strRef><c:f>Sheet1!$A$2:$A$" << (fx.category_names.size() + 1)
+       << "</c:strCache></c:strRef></c:tx>";
+    if (s_idx == 0 && fx.with_series0_data_point_override) {
+        ss << R"(<c:dPt><c:idx val="0"/><c:invertIfNegative val="0"/>)"
+              R"(<c:bubble3D val="0"/><c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr></c:dPt>)";
+    }
+    ss << "<c:cat><c:strRef><c:f>Sheet1!$A$2:$A$" << (fx.category_names.size() + 1)
        << "</c:f><c:strCache>"
        << "<c:ptCount val=\"" << fx.category_names.size() << "\"/>";
     for (std::size_t i = 0; i < fx.category_names.size(); ++i) {
@@ -208,7 +212,18 @@ std::string build_chart_xml(const ChartFixture& fx, bool with_external_data = fa
        << R"(<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart")"
        << R"( xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main")"
        << R"( xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">)"
-       << "<c:chart><c:plotArea><c:layout/>"
+       << "<c:chart>";
+    if (!fx.initial_title.empty()) {
+        // Distinctive rPr/pPr/bodyPr so a test can tell "preserved the
+        // template's styling" apart from "just wrote a bare new run".
+        ss << "<c:title><c:tx><c:rich>"
+              R"(<a:bodyPr rot="5400000"/><a:lstStyle/>)"
+              R"(<a:p><a:pPr algn="ctr"/><a:r>)"
+              R"(<a:rPr b="1" sz="1400"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:rPr>)"
+           << "<a:t>" << fx.initial_title << "</a:t>"
+              "</a:r></a:p></c:rich></c:tx></c:title>";
+    }
+    ss << "<c:plotArea><c:layout/>"
        << "<" << elem << ">";
 
     if (is_bar)  ss << R"(<c:barDir val="col"/><c:grouping val="clustered"/>)";

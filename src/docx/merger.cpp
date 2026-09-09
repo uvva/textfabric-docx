@@ -1823,18 +1823,43 @@ void rewrite_numeric_cache(pugi::xml_node val, const std::string& range,
 }
 
 // Replace `title`'s <c:tx> with a single-run DrawingML rich-text block
-// containing `text`. Collapses whatever multi-run formatting the template
-// had — setting a title programmatically is a full overwrite, not a
-// find/replace inside existing runs.
+// containing `text`. This is a full text overwrite, not a find/replace
+// inside existing runs — a template title with several differently-
+// formatted runs ends up as one run either way, since we're setting one
+// plain string. But the box-level formatting (<a:bodyPr> — rotation,
+// autofit, ...; <a:lstStyle>), the paragraph's <a:pPr> (alignment, ...) and
+// the *first* run's <a:rPr> (font/size/color/bold/...) are carried over
+// from whatever <c:tx>/<c:rich> already existed, so a template's chosen
+// title styling survives a programmatic setChartTitle/setChartAxisTitle
+// call instead of being reset to bare defaults. A brand-new title (no
+// prior <c:tx>) gets the minimal empty skeleton the schema requires.
 void set_rich_title_text(pugi::xml_node title, const std::string& text) {
-    if (auto old_tx = title.child("c:tx")) title.remove_child(old_tx);
+    auto old_tx   = title.child("c:tx");
+    auto old_rich = old_tx ? old_tx.child("c:rich") : pugi::xml_node{};
+
+    pugi::xml_node old_body_pr, old_lst_style, old_p_pr, old_run_pr;
+    if (old_rich) {
+        old_body_pr   = old_rich.child("a:bodyPr");
+        old_lst_style = old_rich.child("a:lstStyle");
+        if (auto old_p = old_rich.child("a:p")) {
+            old_p_pr = old_p.child("a:pPr");
+            if (auto old_r = old_p.child("a:r")) old_run_pr = old_r.child("a:rPr");
+        }
+    }
+
     auto tx   = title.prepend_child("c:tx");
     auto rich = tx.append_child("c:rich");
-    rich.append_child("a:bodyPr");
-    rich.append_child("a:lstStyle");
+    if (old_body_pr)   rich.append_copy(old_body_pr);
+    else               rich.append_child("a:bodyPr");
+    if (old_lst_style) rich.append_copy(old_lst_style);
+    else               rich.append_child("a:lstStyle");
     auto p = rich.append_child("a:p");
+    if (old_p_pr) p.append_copy(old_p_pr);
     auto r = p.append_child("a:r");
+    if (old_run_pr) r.append_copy(old_run_pr);
     r.append_child("a:t").text().set(text.c_str());
+
+    if (old_tx) title.remove_child(old_tx);
 }
 
 // First child of `ax` (a <c:catAx>/<c:valAx>) that a new <c:title> must be
@@ -2323,10 +2348,12 @@ void DocxMerger::setChartData(const std::string&              bookmark,
     // nodes (and their <c:spPr> styling) in template order, clone the last
     // template series' style for any extra requested series, and drop any
     // surplus template series. Existing <c:dPt> per-point color overrides
-    // are left as-is — they reference specific point indices and aren't
-    // regenerated for a reshaped category axis (a documented gap, not a
-    // silent corruption: consumers ignore a <c:dPt> whose idx has no
-    // matching point).
+    // are dropped below, per series — they're keyed to point indices from
+    // the *old* category axis, which have no principled mapping onto a
+    // reshaped one (idx 3 might have been "Q4" before and "some other
+    // category" now); every point falls back to the chart's normal
+    // per-index theme-color rotation instead of carrying over a
+    // now-arbitrary override.
     while (template_sers.size() < series.size()) {
         auto clone = type_node.insert_copy_after(template_sers.back(), template_sers.back());
         template_sers.push_back(clone);
@@ -2353,6 +2380,10 @@ void DocxMerger::setChartData(const std::string&              bookmark,
             ser.insert_child_after("c:order", ser.child("c:idx")).append_attribute("val") =
                 static_cast<unsigned>(s);
         }
+
+        // Stale per-point color overrides — see the reconciliation comment
+        // above for why these can't just be kept.
+        while (auto dpt = ser.child("c:dPt")) ser.remove_child(dpt);
 
         const std::string col       = column_letter(s + 1);
         const std::string name_ref  = fmt::format("{}!${}$1", sheet_name, col);
