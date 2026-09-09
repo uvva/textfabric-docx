@@ -163,6 +163,88 @@ public:
                                const std::string& category,
                                double             value) = 0;
 
+    /// Rename an existing chart series in place — same (series, category)
+    /// data points, new display name. Does not add or remove a series;
+    /// use setChartData for that.
+    ///
+    /// Throws ReportException:
+    ///   - InvalidBookmark: bookmark not found, not in a <w:p>, or that
+    ///                      paragraph has no chart
+    ///   - InvalidField:    `old_name` doesn't match any series in the chart
+    ///   - NotImplemented:  chart is scatter/bubble/stock/surface
+    virtual void setChartSeriesName(const std::string& bookmark,
+                                    const std::string& old_name,
+                                    const std::string& new_name) = 0;
+
+    /// Which axis setChartAxisTitle targets.
+    enum class ChartAxis { Category, Value };
+
+    /// Set the chart's title text, replacing whatever the template author
+    /// set in Excel/Word (including "no title" — autoTitleDeleted is
+    /// cleared and a title element is created if the chart didn't have
+    /// one).
+    ///
+    /// Throws ReportException:
+    ///   - InvalidBookmark: bookmark not found, not in a <w:p>, or that
+    ///                      paragraph has no chart
+    ///   - NotImplemented:  chart is scatter/bubble/stock/surface
+    virtual void setChartTitle(const std::string& bookmark,
+                               const std::string& title) = 0;
+
+    /// Set the title text of the chart's category or value axis.
+    /// Same title-creation behavior as setChartTitle when the axis has no
+    /// title yet.
+    ///
+    /// Throws ReportException:
+    ///   - InvalidBookmark: bookmark not found, not in a <w:p>, or that
+    ///                      paragraph has no chart
+    ///   - InvalidField:    chart has no axis of the requested kind (e.g.
+    ///                      a pie chart has neither)
+    ///   - NotImplemented:  chart is scatter/bubble/stock/surface
+    virtual void setChartAxisTitle(const std::string& bookmark,
+                                   ChartAxis           axis,
+                                   const std::string&  title) = 0;
+
+    /// One named series' values for setChartData, in the same order as
+    /// the `categories` vector passed alongside it.
+    struct ChartSeries {
+        std::string         name;
+        std::vector<double> values;
+    };
+
+    /// Replace a chart's entire category axis and series set — unlike
+    /// setChartValue, this can add or remove categories/series, not just
+    /// overwrite existing points.
+    ///
+    /// `categories` becomes the new category axis, in order. Each entry of
+    /// `series` supplies a name and one value per category (`values.size()`
+    /// must equal `categories.size()`). The template's existing series
+    /// supply the visual style (color/marker/line) — the first `series.size()`
+    /// of them are reused in template order and restyled with the new
+    /// name/data; if `series` has more entries than the template had series,
+    /// the extra ones clone the last template series' style; if fewer, the
+    /// surplus template series are removed.
+    ///
+    /// When the chart carries an embedded workbook (word/embeddings/*.xlsx,
+    /// linked via <c:externalData>), its backing worksheet is rewritten to
+    /// match — so "Edit Data in Excel"/"Refresh Data" in Word stays
+    /// consistent with what's on screen. A chart with no embedded workbook
+    /// only gets its cache rewritten, same as setChartValue.
+    ///
+    /// Throws ReportException:
+    ///   - InvalidBookmark: bookmark not found, not in a <w:p>, or that
+    ///                      paragraph has no chart
+    ///   - InvalidField:    `categories` or some `series[i].values` is
+    ///                      empty, or a values vector's length doesn't
+    ///                      match `categories.size()`
+    ///   - CantCopyDocxTemplate: template's chart has zero template series
+    ///                      to clone style from, or its embedded workbook
+    ///                      is present but not a well-formed .xlsx
+    ///   - NotImplemented:  chart is scatter/bubble/stock/surface
+    virtual void setChartData(const std::string&              bookmark,
+                              const std::vector<std::string>&  categories,
+                              const std::vector<ChartSeries>&  series) = 0;
+
     /// Paste/activate a template section anchored at a bookmark.
     /// Calling paste() materializes the currently-staged field values
     /// into the document.

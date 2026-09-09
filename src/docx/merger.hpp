@@ -50,6 +50,21 @@ public:
                        const std::string& category,
                        double             value) override;
 
+    void setChartSeriesName(const std::string& bookmark,
+                            const std::string& old_name,
+                            const std::string& new_name) override;
+
+    void setChartTitle(const std::string& bookmark,
+                       const std::string& title) override;
+
+    void setChartAxisTitle(const std::string& bookmark,
+                           ChartAxis           axis,
+                           const std::string&  title) override;
+
+    void setChartData(const std::string&             bookmark,
+                      const std::vector<std::string>& categories,
+                      const std::vector<ChartSeries>& series) override;
+
     void paste(const std::string& bookmark) override;
 
     // ── Introspection (used by tests) ────────────────────────────────────
@@ -79,6 +94,13 @@ private:
     /// Find all <w:bookmarkStart> nodes matching `name`.
     /// Returns nodes in document order.
     std::vector<pugi::xml_node> find_bookmark_starts(const std::string& name) const;
+
+    /// Resolve `bookmark`'s enclosing <w:p>'s embedded <c:chart> down to
+    /// the archive part name holding its chart XML (e.g.
+    /// "word/charts/chart1.xml"). Shared entry point for every
+    /// setChart*() method.
+    /// Throws ReportException{InvalidBookmark | CantCopyDocxTemplate}.
+    [[nodiscard]] std::string locate_chart_part(const std::string& bookmark) const;
 };
 
 } // namespace textfabric::docx

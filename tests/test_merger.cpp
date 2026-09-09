@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <pugixml.hpp>
 #include <zip.h>
 
 #include "textfabric/merger.hpp"
@@ -60,6 +61,20 @@ inline std::string read_docx_part(const fs::path& docx, const char* name) {
     }
     zip_close(z);
     return buf;
+}
+
+// Slurp a single entry out of a zip blob held in memory (e.g. an embedded
+// .xlsx read out of read_docx_part's result) via a temp-file round trip —
+// same trick DocxMerger uses internally to touch a nested archive.
+inline std::string read_nested_part(const std::string& zip_bytes, const char* name) {
+    const auto tmp = fs::temp_directory_path() / "tf_nested_read.xlsx";
+    {
+        std::ofstream f(tmp, std::ios::binary);
+        f.write(zip_bytes.data(), static_cast<std::streamsize>(zip_bytes.size()));
+    }
+    const std::string out = read_docx_part(tmp, name);
+    fs::remove(tmp);
+    return out;
 }
 
 // Body with two bookmarks, including a multi-run field (split placeholder).
@@ -1556,6 +1571,509 @@ TEST_CASE("setChartValue before load throws CantOpenTemplate",
     } catch (const textfabric::ReportException& e) {
         REQUIRE(e.code() == textfabric::ReportError::CantOpenTemplate);
     }
+}
+
+// ── setChartSeriesName ────────────────────────────────────────────────────
+
+TEST_CASE("setChartSeriesName renames a series without touching its data",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_rename_in",  ".docx");
+    const auto out = tmp_file("chart_rename_out", ".docx");
+    tf_test::write_chart_template_docx(in);   // Sales/Costs × Q1/Q2
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartSeriesName("kStatChart", "Sales", "Revenue"));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto bar = doc.child("c:chartSpace").child("c:chart").child("c:plotArea").child("c:barChart");
+    auto sers = bar.children("c:ser");
+    auto it = sers.begin();
+    REQUIRE(std::string((*it).child("c:tx").child("c:strRef").child("c:strCache")
+                         .child("c:pt").child_value("c:v")) == "Revenue");
+    ++it;
+    REQUIRE(std::string((*it).child("c:tx").child("c:strRef").child("c:strCache")
+                         .child("c:pt").child_value("c:v")) == "Costs");
+    // Values untouched.
+    REQUIRE(xml.find(R"(<c:v>10</c:v>)") != std::string::npos);
+    REQUIRE(xml.find(R"(<c:v>20</c:v>)") != std::string::npos);
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartSeriesName throws InvalidField on unknown series",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_rename_bad", ".docx");
+    tf_test::write_chart_template_docx(in);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartSeriesName("kStatChart", "NoSuchSeries", "X");
+        FAIL("expected InvalidField");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::InvalidField);
+    }
+    fs::remove(in);
+}
+
+TEST_CASE("setChartSeriesName throws NotImplemented on scatter chart",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_rename_scatter", ".docx");
+    tf_test::ChartFixture fx;
+    fx.kind = tf_test::ChartKind::Scatter;
+    tf_test::write_chart_template_docx(in, fx);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartSeriesName("kStatChart", "Sales", "X");
+        FAIL("expected NotImplemented");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::NotImplemented);
+    }
+    fs::remove(in);
+}
+
+TEST_CASE("setChartSeriesName before load throws CantOpenTemplate",
+          "[merger][chart][error]") {
+    auto merger = textfabric::make_docx_merger();
+    try {
+        merger->setChartSeriesName("b", "s", "n");
+        FAIL("expected CantOpenTemplate");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::CantOpenTemplate);
+    }
+}
+
+// ── setChartTitle ─────────────────────────────────────────────────────────
+
+TEST_CASE("setChartTitle creates a title and clears autoTitleDeleted",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_title_in",  ".docx");
+    const auto out = tmp_file("chart_title_out", ".docx");
+    tf_test::write_chart_template_docx(in);   // no <c:title> in the fixture
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartTitle("kStatChart", "Quarterly Sales"));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto chart_node = doc.child("c:chartSpace").child("c:chart");
+    auto title_text = chart_node.child("c:title").child("c:tx").child("c:rich")
+                       .child("a:p").child("a:r").child_value("a:t");
+    REQUIRE(std::string(title_text) == "Quarterly Sales");
+    REQUIRE(std::string(chart_node.child("c:autoTitleDeleted").attribute("val").value()) == "0");
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartTitle replaces an existing title instead of duplicating it",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_title_replace_in",  ".docx");
+    const auto out = tmp_file("chart_title_replace_out", ".docx");
+    tf_test::write_chart_template_docx(in);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartTitle("kStatChart", "First Title"));
+    REQUIRE_NOTHROW(merger->setChartTitle("kStatChart", "Second Title"));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    REQUIRE(xml.find("First Title") == std::string::npos);
+    REQUIRE(xml.find("Second Title") != std::string::npos);
+    // Exactly one <a:t> run under the title — no leftover duplicate runs.
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto title = doc.child("c:chartSpace").child("c:chart").child("c:title");
+    std::size_t run_count = 0;
+    for (auto r : title.child("c:tx").child("c:rich").child("a:p").children("a:r")) {
+        (void)r;
+        ++run_count;
+    }
+    REQUIRE(run_count == 1);
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartTitle throws NotImplemented on scatter chart",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_title_scatter", ".docx");
+    tf_test::ChartFixture fx;
+    fx.kind = tf_test::ChartKind::Scatter;
+    tf_test::write_chart_template_docx(in, fx);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartTitle("kStatChart", "X");
+        FAIL("expected NotImplemented");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::NotImplemented);
+    }
+    fs::remove(in);
+}
+
+// ── setChartAxisTitle ─────────────────────────────────────────────────────
+
+TEST_CASE("setChartAxisTitle sets the category axis title",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_axtitle_cat_in",  ".docx");
+    const auto out = tmp_file("chart_axtitle_cat_out", ".docx");
+    tf_test::write_chart_template_docx(in);   // bar: has catAx/valAx
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartAxisTitle(
+        "kStatChart", textfabric::IReportMerger::ChartAxis::Category, "Quarter"));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto plot_area = doc.child("c:chartSpace").child("c:chart").child("c:plotArea");
+    auto cat_title = plot_area.child("c:catAx").child("c:title").child("c:tx")
+                     .child("c:rich").child("a:p").child("a:r").child_value("a:t");
+    REQUIRE(std::string(cat_title) == "Quarter");
+    REQUIRE(!plot_area.child("c:valAx").child("c:title"));
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartAxisTitle sets the value axis title",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_axtitle_val_in",  ".docx");
+    const auto out = tmp_file("chart_axtitle_val_out", ".docx");
+    tf_test::write_chart_template_docx(in);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartAxisTitle(
+        "kStatChart", textfabric::IReportMerger::ChartAxis::Value, "USD"));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto plot_area = doc.child("c:chartSpace").child("c:chart").child("c:plotArea");
+    auto val_title = plot_area.child("c:valAx").child("c:title").child("c:tx")
+                     .child("c:rich").child("a:p").child("a:r").child_value("a:t");
+    REQUIRE(std::string(val_title) == "USD");
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartAxisTitle throws InvalidField when the chart has no such axis",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_axtitle_pie", ".docx");
+    tf_test::ChartFixture fx;
+    fx.kind = tf_test::ChartKind::Pie;   // pie has neither catAx nor valAx
+    tf_test::write_chart_template_docx(in, fx);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartAxisTitle(
+            "kStatChart", textfabric::IReportMerger::ChartAxis::Category, "X");
+        FAIL("expected InvalidField");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::InvalidField);
+    }
+    fs::remove(in);
+}
+
+TEST_CASE("setChartAxisTitle throws NotImplemented on scatter chart",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_axtitle_scatter", ".docx");
+    tf_test::ChartFixture fx;
+    fx.kind = tf_test::ChartKind::Scatter;
+    tf_test::write_chart_template_docx(in, fx);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartAxisTitle(
+            "kStatChart", textfabric::IReportMerger::ChartAxis::Value, "X");
+        FAIL("expected NotImplemented");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::NotImplemented);
+    }
+    fs::remove(in);
+}
+
+// ── setChartData ───────────────────────────────────────────────────────────
+
+TEST_CASE("setChartData reshapes to more categories than the template had",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_data_more_in",  ".docx");
+    const auto out = tmp_file("chart_data_more_out", ".docx");
+    tf_test::write_chart_template_docx(in);   // 2 series × 2 categories
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartData(
+        "kStatChart",
+        {"Q1", "Q2", "Q3", "Q4"},
+        {{"Sales", {1, 2, 3, 4}}, {"Costs", {5, 6, 7, 8}}}));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto bar = doc.child("c:chartSpace").child("c:chart").child("c:plotArea").child("c:barChart");
+
+    std::size_t ser_count = 0;
+    for (auto ser : bar.children("c:ser")) {
+        ++ser_count;
+        auto cat = ser.child("c:cat").child("c:strRef");
+        REQUIRE(cat.child("c:strCache").child("c:ptCount").attribute("val").as_uint() == 4);
+        REQUIRE(std::string(cat.child("c:f").child_value()) == "Sheet1!$A$2:$A$5");
+        auto val = ser.child("c:val").child("c:numRef");
+        REQUIRE(val.child("c:numCache").child("c:ptCount").attribute("val").as_uint() == 4);
+    }
+    REQUIRE(ser_count == 2);
+    REQUIRE(xml.find(R"(<c:v>Q3</c:v>)") != std::string::npos);
+    REQUIRE(xml.find(R"(<c:v>4</c:v>)") != std::string::npos);   // Sales/Q4
+    REQUIRE(xml.find(R"(<c:v>8</c:v>)") != std::string::npos);   // Costs/Q4
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartData reshapes to fewer categories than the template had",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_data_fewer_in",  ".docx");
+    const auto out = tmp_file("chart_data_fewer_out", ".docx");
+    tf_test::write_chart_template_docx(in);
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartData(
+        "kStatChart", {"Only"}, {{"Sales", {42.0}}, {"Costs", {7.0}}}));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto bar = doc.child("c:chartSpace").child("c:chart").child("c:plotArea").child("c:barChart");
+    for (auto ser : bar.children("c:ser")) {
+        REQUIRE(ser.child("c:cat").child("c:strRef").child("c:strCache")
+                   .child("c:ptCount").attribute("val").as_uint() == 1);
+    }
+    REQUIRE(xml.find("Q1") == std::string::npos);
+    REQUIRE(xml.find("Q2") == std::string::npos);
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartData adds a series cloning the template's visual style",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_data_addser_in",  ".docx");
+    const auto out = tmp_file("chart_data_addser_out", ".docx");
+    tf_test::write_chart_template_docx(in);   // Sales, Costs
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartData(
+        "kStatChart", {"Q1", "Q2"},
+        {{"Sales", {1, 2}}, {"Costs", {3, 4}}, {"Profit", {5, 6}}}));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto bar = doc.child("c:chartSpace").child("c:chart").child("c:plotArea").child("c:barChart");
+
+    std::vector<std::string> names;
+    std::vector<unsigned>    idxs;
+    for (auto ser : bar.children("c:ser")) {
+        names.emplace_back(ser.child("c:tx").child("c:strRef").child("c:strCache")
+                            .child("c:pt").child_value("c:v"));
+        idxs.push_back(ser.child("c:idx").attribute("val").as_uint());
+    }
+    REQUIRE(names == std::vector<std::string>{"Sales", "Costs", "Profit"});
+    REQUIRE(idxs == std::vector<unsigned>{0, 1, 2});
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartData drops a surplus template series",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_data_dropser_in",  ".docx");
+    const auto out = tmp_file("chart_data_dropser_out", ".docx");
+    tf_test::write_chart_template_docx(in);   // Sales, Costs
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartData(
+        "kStatChart", {"Q1", "Q2"}, {{"OnlyOne", {1, 2}}}));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    const auto xml = read_docx_part(out, "word/charts/chart1.xml");
+    pugi::xml_document doc;
+    REQUIRE(doc.load_buffer(xml.data(), xml.size()));
+    auto bar = doc.child("c:chartSpace").child("c:chart").child("c:plotArea").child("c:barChart");
+    std::size_t ser_count = 0;
+    for (auto ser : bar.children("c:ser")) { (void)ser; ++ser_count; }
+    REQUIRE(ser_count == 1);
+    REQUIRE(xml.find("Costs") == std::string::npos);
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartData throws InvalidField on empty categories",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_data_empty_cats", ".docx");
+    tf_test::write_chart_template_docx(in);
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartData("kStatChart", {}, {{"Sales", {}}});
+        FAIL("expected InvalidField");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::InvalidField);
+    }
+    fs::remove(in);
+}
+
+TEST_CASE("setChartData throws InvalidField on empty series",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_data_empty_series", ".docx");
+    tf_test::write_chart_template_docx(in);
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartData("kStatChart", {"Q1"}, {});
+        FAIL("expected InvalidField");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::InvalidField);
+    }
+    fs::remove(in);
+}
+
+TEST_CASE("setChartData throws InvalidField when a series' value count mismatches categories",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_data_mismatch", ".docx");
+    tf_test::write_chart_template_docx(in);
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartData("kStatChart", {"Q1", "Q2"}, {{"Sales", {1.0}}});
+        FAIL("expected InvalidField");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::InvalidField);
+    }
+    fs::remove(in);
+}
+
+TEST_CASE("setChartData throws NotImplemented on scatter chart",
+          "[merger][chart][error]") {
+    const auto in = tmp_file("chart_data_scatter", ".docx");
+    tf_test::ChartFixture fx;
+    fx.kind = tf_test::ChartKind::Scatter;
+    tf_test::write_chart_template_docx(in, fx);
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    try {
+        merger->setChartData("kStatChart", {"Q1"}, {{"Sales", {1.0}}});
+        FAIL("expected NotImplemented");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::NotImplemented);
+    }
+    fs::remove(in);
+}
+
+TEST_CASE("setChartData before load throws CantOpenTemplate",
+          "[merger][chart][error]") {
+    auto merger = textfabric::make_docx_merger();
+    try {
+        merger->setChartData("b", {"c"}, {{"s", {1.0}}});
+        FAIL("expected CantOpenTemplate");
+    } catch (const textfabric::ReportException& e) {
+        REQUIRE(e.code() == textfabric::ReportError::CantOpenTemplate);
+    }
+}
+
+TEST_CASE("setChartData syncs the embedded workbook when the chart has one",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_data_xlsx_in",  ".docx");
+    const auto out = tmp_file("chart_data_xlsx_out", ".docx");
+    tf_test::write_chart_template_docx_with_workbook(in);   // Sales/Costs × Q1/Q2
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartData(
+        "kStatChart", {"Q1", "Q2", "Q3"},
+        {{"Sales", {1, 2, 3}}, {"Costs", {4, 5, 6}}}));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    // Chart cache/ranges reflect the new shape.
+    const auto chart_xml = read_docx_part(out, "word/charts/chart1.xml");
+    REQUIRE(chart_xml.find("Sheet1!$A$2:$A$4") != std::string::npos);
+
+    // The embedded workbook's worksheet was rewritten to match — not left
+    // stale, which is the whole point of syncing it in the first place.
+    const auto xlsx_bytes = read_docx_part(out, "word/embeddings/Microsoft_Excel_Worksheet1.xlsx");
+    REQUIRE(!xlsx_bytes.empty());
+    const auto sheet_xml = read_nested_part(xlsx_bytes, "xl/worksheets/sheet1.xml");
+    REQUIRE(!sheet_xml.empty());
+
+    pugi::xml_document sheet_doc;
+    REQUIRE(sheet_doc.load_buffer(sheet_xml.data(), sheet_xml.size()));
+    auto ws = sheet_doc.child("worksheet");
+    REQUIRE(std::string(ws.child("dimension").attribute("ref").value()) == "A1:C4");
+
+    // Row 2 = Q1: A2="Q1", B2=1 (Sales), C2=4 (Costs).
+    pugi::xml_node row2;
+    for (auto row : ws.child("sheetData").children("row")) {
+        if (std::string(row.attribute("r").value()) == "2") { row2 = row; break; }
+    }
+    REQUIRE(row2);
+    std::string a2, b2, c2;
+    for (auto c : row2.children("c")) {
+        const std::string ref = c.attribute("r").value();
+        if (ref == "A2") a2 = c.child("is").child_value("t");
+        if (ref == "B2") b2 = c.child_value("v");
+        if (ref == "C2") c2 = c.child_value("v");
+    }
+    REQUIRE(a2 == "Q1");
+    REQUIRE(b2 == "1");
+    REQUIRE(c2 == "4");
+
+    fs::remove(in);
+    fs::remove(out);
+}
+
+TEST_CASE("setChartData leaves a chart with no embedded workbook alone (no error)",
+          "[merger][chart]") {
+    const auto in  = tmp_file("chart_data_noxlsx_in",  ".docx");
+    const auto out = tmp_file("chart_data_noxlsx_out", ".docx");
+    tf_test::write_chart_template_docx(in);   // no <c:externalData> at all
+
+    auto merger = textfabric::make_docx_merger();
+    merger->load(in.string());
+    REQUIRE_NOTHROW(merger->setChartData("kStatChart", {"Q1"}, {{"Sales", {1.0}}}));
+    REQUIRE_NOTHROW(merger->save(out.string()));
+
+    REQUIRE(read_docx_part(out, "word/embeddings/Microsoft_Excel_Worksheet1.xlsx").empty());
+
+    fs::remove(in);
+    fs::remove(out);
 }
 
 // ── paste ──────────────────────────────────────────────────────────────────

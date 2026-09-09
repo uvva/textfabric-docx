@@ -197,7 +197,7 @@ std::string build_ser_xval_yval(const ChartFixture& fx, std::size_t s_idx) {
     return ss.str();
 }
 
-std::string build_chart_xml(const ChartFixture& fx) {
+std::string build_chart_xml(const ChartFixture& fx, bool with_external_data = false) {
     const char* elem   = chart_element_name(fx.kind);
     const bool is_bar  = (fx.kind == ChartKind::Bar);
     const bool is_pie  = (fx.kind == ChartKind::Pie);
@@ -234,7 +234,11 @@ std::string build_chart_xml(const ChartFixture& fx) {
            << R"(<c:delete val="0"/><c:axPos val="l"/><c:crossAx val="111111111"/></c:valAx>)";
     }
 
-    ss << "</c:plotArea></c:chart></c:chartSpace>";
+    ss << "</c:plotArea></c:chart>";
+    if (with_external_data) {
+        ss << R"(<c:externalData r:id="rIdData"><c:autoUpdate val="0"/></c:externalData>)";
+    }
+    ss << "</c:chartSpace>";
     return ss.str();
 }
 
@@ -281,6 +285,59 @@ constexpr const char* kDocRelsWithChart = R"(<?xml version="1.0" encoding="UTF-8
   <Relationship Id="rIdChart1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/>
 </Relationships>)";
 
+constexpr const char* kChartContentTypesWithWorkbook = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+</Types>)";
+
+constexpr const char* kChartRelsWithExternalData = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdData" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="../embeddings/Microsoft_Excel_Worksheet1.xlsx"/>
+</Relationships>)";
+
+// ─── Minimal embedded workbook (nested .xlsx) ──────────────────────────────
+
+constexpr const char* kXlsxContentTypes = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>)";
+
+constexpr const char* kXlsxPackageRels = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>)";
+
+constexpr const char* kXlsxWorkbook = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rIdSheet1"/>
+  </sheets>
+</workbook>)";
+
+constexpr const char* kXlsxWorkbookRels = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdSheet1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>)";
+
+// Mirrors ChartFixture's default (Sales/Costs × Q1/Q2, data {{10,20},{5,15}})
+// — column A = categories, B/C = the two series, row 1 = series-name header.
+constexpr const char* kXlsxSheet1 = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:C3"/>
+  <sheetData>
+    <row r="1"><c r="B1" t="inlineStr"><is><t>Sales</t></is></c><c r="C1" t="inlineStr"><is><t>Costs</t></is></c></row>
+    <row r="2"><c r="A2" t="inlineStr"><is><t>Q1</t></is></c><c r="B2"><v>10</v></c><c r="C2"><v>5</v></c></row>
+    <row r="3"><c r="A3" t="inlineStr"><is><t>Q2</t></is></c><c r="B3"><v>20</v></c><c r="C3"><v>15</v></c></row>
+  </sheetData>
+</worksheet>)";
+
 } // namespace
 
 void write_chart_template_docx(const std::filesystem::path& out,
@@ -301,6 +358,49 @@ void write_chart_template_docx(const std::filesystem::path& out,
         {"word/_rels/document.xml.rels",   kDocRelsWithChart},
         {"word/document.xml",              build_document_with_chart(fx.bookmark_name)},
         {"word/charts/chart1.xml",         build_chart_xml(fx)},
+    };
+    write_docx(out, parts);
+}
+
+void write_chart_template_docx_with_workbook(const std::filesystem::path& out,
+                                             const ChartFixture&          fx)
+{
+    if (fx.series_names.size() != fx.data.size()) {
+        throw std::runtime_error("chart fixture: data rows != series count");
+    }
+    for (const auto& row : fx.data) {
+        if (row.size() != fx.category_names.size()) {
+            throw std::runtime_error("chart fixture: data row width != category count");
+        }
+    }
+
+    // Build the nested .xlsx via the same generic zip packer, round-tripped
+    // through a temp file so we get real, valid zip bytes to embed.
+    const auto xlsx_tmp = out.string() + ".embedded.xlsx";
+    write_docx(xlsx_tmp, {
+        {"[Content_Types].xml",         kXlsxContentTypes},
+        {"_rels/.rels",                 kXlsxPackageRels},
+        {"xl/workbook.xml",             kXlsxWorkbook},
+        {"xl/_rels/workbook.xml.rels",  kXlsxWorkbookRels},
+        {"xl/worksheets/sheet1.xml",    kXlsxSheet1},
+    });
+    std::string xlsx_bytes;
+    {
+        std::ifstream f(xlsx_tmp, std::ios::binary);
+        std::ostringstream oss;
+        oss << f.rdbuf();
+        xlsx_bytes = oss.str();
+    }
+    std::filesystem::remove(xlsx_tmp);
+
+    std::vector<DocxPart> parts = {
+        {"[Content_Types].xml",                        kChartContentTypesWithWorkbook},
+        {"_rels/.rels",                                kPackageRels},
+        {"word/_rels/document.xml.rels",               kDocRelsWithChart},
+        {"word/document.xml",                          build_document_with_chart(fx.bookmark_name)},
+        {"word/charts/chart1.xml",                     build_chart_xml(fx, /*with_external_data=*/true)},
+        {"word/charts/_rels/chart1.xml.rels",          kChartRelsWithExternalData},
+        {"word/embeddings/Microsoft_Excel_Worksheet1.xlsx", xlsx_bytes},
     };
     write_docx(out, parts);
 }

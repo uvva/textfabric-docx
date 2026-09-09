@@ -1556,17 +1556,7 @@ bool is_unsupported_xy_chart(std::string_view tag) {
 
 } // namespace
 
-void DocxMerger::setChartValue(const std::string& bookmark,
-                               const std::string& /*field*/,
-                               const std::string& series,
-                               const std::string& category,
-                               double             value)
-{
-    if (!loaded_) {
-        throw ReportException(ReportError::CantOpenTemplate,
-                              "setChartValue before load()");
-    }
-
+std::string DocxMerger::locate_chart_part(const std::string& bookmark) const {
     const auto starts = find_bookmark_starts(bookmark);
     if (starts.empty()) {
         throw ReportException(
@@ -1610,12 +1600,27 @@ void DocxMerger::setChartValue(const std::string& bookmark,
 
     // Relationship Target is relative to word/ — e.g. "charts/chart1.xml".
     const std::string chart_part = "word/" + target;
-    auto chart_it = parts_.find(chart_part);
-    if (chart_it == parts_.end()) {
+    if (parts_.find(chart_part) == parts_.end()) {
         throw ReportException(
             ReportError::CantCopyDocxTemplate,
             fmt::format("chart part not in archive: {}", chart_part));
     }
+    return chart_part;
+}
+
+void DocxMerger::setChartValue(const std::string& bookmark,
+                               const std::string& /*field*/,
+                               const std::string& series,
+                               const std::string& category,
+                               double             value)
+{
+    if (!loaded_) {
+        throw ReportException(ReportError::CantOpenTemplate,
+                              "setChartValue before load()");
+    }
+
+    const std::string chart_part = locate_chart_part(bookmark);
+    auto chart_it = parts_.find(chart_part);
 
     pugi::xml_document chart_doc;
     if (!chart_doc.load_buffer(chart_it->second.data(), chart_it->second.size())) {
@@ -1667,6 +1672,723 @@ void DocxMerger::setChartValue(const std::string& bookmark,
     throw ReportException(
         ReportError::InvalidField,
         fmt::format("series '{}' not found in chart '{}'", series, chart_part));
+}
+
+// ── setChartSeriesName / setChartTitle / setChartAxisTitle / setChartData ───
+//
+// Shared helpers. setChartSeriesName rewrites the same <c:tx>/<c:strRef>/
+// <c:strCache> shape write_value_point's sibling already reads via
+// read_series_name(). setChartTitle/setChartAxisTitle build a plain
+// single-run DrawingML <c:title>. setChartData fully replaces the category
+// axis and series set — unlike setChartValue, it can change point counts —
+// and, when the chart carries an embedded workbook (word/embeddings/*.xlsx,
+// linked through <c:externalData>), rewrites that workbook's backing sheet
+// too, via a temp-file round trip through libzip (the simplest way to get
+// at a nested zip archive with the same read/write primitives read_archive/
+// write_archive already use for the outer .docx).
+
+namespace {
+
+// 0 → "A", 1 → "B", ..., 25 → "Z", 26 → "AA", ... — spreadsheet column
+// letters for a 0-based column index.
+std::string column_letter(std::size_t zero_based_index) {
+    std::string s;
+    long n = static_cast<long>(zero_based_index) + 1;
+    while (n > 0) {
+        const long rem = (n - 1) % 26;
+        s.insert(s.begin(), static_cast<char>('A' + rem));
+        n = (n - 1) / 26;
+    }
+    return s;
+}
+
+// Extracts the sheet name from a chart formula like "Sheet1!$B$2:$B$11" or
+// "'My Sheet'!$B$2:$B$11" (quoted form, with '' as an escaped quote).
+// Returns "" if `f` has no '!' separator.
+std::string sheet_name_from_formula(const std::string& f) {
+    const auto bang = f.find('!');
+    if (bang == std::string::npos) return {};
+    std::string name = f.substr(0, bang);
+    if (name.size() >= 2 && name.front() == '\'' && name.back() == '\'') {
+        name = name.substr(1, name.size() - 2);
+        std::string out;
+        for (std::size_t i = 0; i < name.size(); ++i) {
+            if (name[i] == '\'' && i + 1 < name.size() && name[i + 1] == '\'') {
+                out += '\'';
+                ++i;
+            } else {
+                out += name[i];
+            }
+        }
+        return out;
+    }
+    return name;
+}
+
+// Rewrite a series' display name — same <c:tx>/<c:strRef>/<c:strCache>/
+// <c:pt>/<c:v> shape read_series_name() reads. Builds the cache from
+// scratch if the series had none at all (rare/malformed template).
+void write_series_name(pugi::xml_node ser, const std::string& new_name) {
+    auto tx = ser.child("c:tx");
+    if (!tx) tx = ser.prepend_child("c:tx");
+    auto ref = tx.child("c:strRef");
+    if (!ref) ref = tx.append_child("c:strRef");
+    auto cache = ref.child("c:strCache");
+    if (!cache) cache = ref.append_child("c:strCache");
+    if (!cache.child("c:ptCount")) {
+        cache.prepend_child("c:ptCount").append_attribute("val") = 1;
+    }
+    auto pt = cache.child("c:pt");
+    if (!pt) {
+        pt = cache.append_child("c:pt");
+        pt.append_attribute("idx") = 0;
+    }
+    if (auto v = pt.child("c:v")) {
+        v.text().set(new_name.c_str());
+    } else {
+        pt.append_child("c:v").text().set(new_name.c_str());
+    }
+}
+
+// Fully replace a <c:cat> (categories) cache with `values` — new <c:f>
+// range and a freshly built <c:strCache> with exactly values.size() points.
+// Unlike write_value_point (single-point in-place update), this can change
+// the point count.
+void rewrite_string_cache(pugi::xml_node cat, const std::string& range,
+                          const std::vector<std::string>& values) {
+    if (!cat) {
+        throw ReportException(ReportError::CantCopyDocxTemplate,
+                              "series is missing <c:cat>");
+    }
+    auto ref = cat.child("c:strRef");
+    if (!ref) {
+        // A purely-numeric category axis uses <c:numRef> instead; switch to
+        // <c:strRef> since setChartData writes text labels.
+        if (auto num_ref = cat.child("c:numRef")) cat.remove_child(num_ref);
+        ref = cat.prepend_child("c:strRef");
+    }
+    if (auto f = ref.child("c:f")) {
+        f.text().set(range.c_str());
+    } else {
+        ref.prepend_child("c:f").text().set(range.c_str());
+    }
+
+    if (auto old_cache = ref.child("c:strCache")) ref.remove_child(old_cache);
+    auto cache = ref.append_child("c:strCache");
+    cache.append_child("c:ptCount").append_attribute("val") =
+        static_cast<unsigned>(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        auto pt = cache.append_child("c:pt");
+        pt.append_attribute("idx") = static_cast<unsigned>(i);
+        pt.append_child("c:v").text().set(values[i].c_str());
+    }
+}
+
+// Fully replace a <c:val> numeric cache the same way, preserving the
+// original <c:formatCode> (defaulting to "General" if there wasn't one).
+void rewrite_numeric_cache(pugi::xml_node val, const std::string& range,
+                           const std::vector<double>& values) {
+    if (!val) {
+        throw ReportException(ReportError::CantCopyDocxTemplate,
+                              "series is missing <c:val>");
+    }
+    auto ref = val.child("c:numRef");
+    if (!ref) {
+        throw ReportException(ReportError::CantCopyDocxTemplate,
+                              "series' <c:val> is missing <c:numRef>");
+    }
+    if (auto f = ref.child("c:f")) {
+        f.text().set(range.c_str());
+    } else {
+        ref.prepend_child("c:f").text().set(range.c_str());
+    }
+
+    std::string format_code = "General";
+    if (auto old_cache = ref.child("c:numCache")) {
+        if (auto fc = old_cache.child("c:formatCode")) format_code = fc.child_value();
+        ref.remove_child(old_cache);
+    }
+    auto cache = ref.append_child("c:numCache");
+    cache.append_child("c:formatCode").text().set(format_code.c_str());
+    cache.append_child("c:ptCount").append_attribute("val") =
+        static_cast<unsigned>(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        auto pt = cache.append_child("c:pt");
+        pt.append_attribute("idx") = static_cast<unsigned>(i);
+        std::ostringstream ss;
+        ss.imbue(std::locale::classic());
+        ss << values[i];
+        pt.append_child("c:v").text().set(ss.str().c_str());
+    }
+}
+
+// Replace `title`'s <c:tx> with a single-run DrawingML rich-text block
+// containing `text`. Collapses whatever multi-run formatting the template
+// had — setting a title programmatically is a full overwrite, not a
+// find/replace inside existing runs.
+void set_rich_title_text(pugi::xml_node title, const std::string& text) {
+    if (auto old_tx = title.child("c:tx")) title.remove_child(old_tx);
+    auto tx   = title.prepend_child("c:tx");
+    auto rich = tx.append_child("c:rich");
+    rich.append_child("a:bodyPr");
+    rich.append_child("a:lstStyle");
+    auto p = rich.append_child("a:p");
+    auto r = p.append_child("a:r");
+    r.append_child("a:t").text().set(text.c_str());
+}
+
+// First child of `ax` (a <c:catAx>/<c:valAx>) that a new <c:title> must be
+// inserted before, per CT_CatAx/CT_ValAx's element sequence. <c:crossAx> is
+// required by the schema, so it's always a valid fallback anchor.
+pugi::xml_node axis_title_anchor(pugi::xml_node ax) {
+    for (const char* name : {"c:majorGridlines", "c:minorGridlines", "c:numFmt",
+                             "c:majorTickMark", "c:minorTickMark", "c:tickLblPos",
+                             "c:spPr", "c:txPr", "c:crossAx"}) {
+        if (auto n = ax.child(name)) return n;
+    }
+    return {};
+}
+
+// Set (creating if absent) the title of `chart_node`'s <c:title> itself, or
+// an axis's <c:title> when `ax` is non-null — shared by setChartTitle and
+// setChartAxisTitle. `insert_before` is where a brand-new <c:title> goes
+// (schema-position anchor); for the chart's own title this also clears
+// <c:autoTitleDeleted>.
+void set_title(pugi::xml_node owner, pugi::xml_node insert_before, const std::string& text) {
+    auto title_node = owner.child("c:title");
+    if (!title_node) {
+        if (!insert_before) {
+            throw ReportException(ReportError::CantCopyDocxTemplate,
+                                  "chart is missing a required element to anchor a new <c:title> at");
+        }
+        title_node = owner.insert_child_before("c:title", insert_before);
+    }
+    set_rich_title_text(title_node, text);
+}
+
+// True if `plot_area` contains at least one supported (cat/val-shaped)
+// chart-type group, out to `saw_unsupported` whether it also/instead
+// contains a scatter/bubble/stock/surface group — shared NotImplemented
+// gate for every setChart*() entry point that doesn't need a specific
+// <c:ser> (title/axis-title setters just need to know the chart is a
+// reshape-able kind at all).
+bool has_supported_chart_type(pugi::xml_node plot_area, bool& saw_unsupported) {
+    saw_unsupported = false;
+    bool saw_supported = false;
+    for (auto type_node : plot_area.children()) {
+        const std::string_view tag = type_node.name();
+        if (is_unsupported_xy_chart(tag)) saw_unsupported = true;
+        else if (is_supported_chart_type(tag)) saw_supported = true;
+    }
+    return saw_supported;
+}
+
+/// RAII temp file — used to round-trip an in-memory zip blob (an embedded
+/// .xlsx living inside the outer .docx zip) through libzip's path-based
+/// API, since that's the same read/write primitive read_archive/
+/// write_archive already use and avoids pulling in libzip's separate
+/// in-memory zip_source API for what's a rare, small nested archive.
+class TempFile {
+public:
+    explicit TempFile(const char* suffix) {
+        const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+        path_ = std::filesystem::temp_directory_path() /
+                fmt::format("textfabric_{}_{}{}", unique,
+                           reinterpret_cast<std::uintptr_t>(this), suffix);
+    }
+    ~TempFile() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+    TempFile(const TempFile&) = delete;
+    TempFile& operator=(const TempFile&) = delete;
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+std::unordered_map<std::string, std::string> read_nested_zip(const std::string& bytes) {
+    TempFile tmp(".xlsx");
+    {
+        std::ofstream f(tmp.path(), std::ios::binary);
+        f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+    int err = 0;
+    zip_t* raw = zip_open(tmp.path().string().c_str(), ZIP_RDONLY, &err);
+    if (!raw) {
+        throw ReportException(ReportError::CantCopyDocxTemplate,
+                              "embedded workbook is not a valid .xlsx (zip_open failed)");
+    }
+    ZipFile zf{raw};
+    return slurp_archive(zf.get());
+}
+
+std::string write_nested_zip(const std::unordered_map<std::string, std::string>& parts) {
+    TempFile tmp(".xlsx");
+    int err = 0;
+    zip_t* raw = zip_open(tmp.path().string().c_str(), ZIP_CREATE | ZIP_EXCL, &err);
+    if (!raw) {
+        throw ReportException(ReportError::CantCopyDocxTemplate,
+                              "failed to create embedded workbook archive");
+    }
+    for (const auto& [name, data] : parts) {
+        zip_source_t* src = zip_source_buffer(raw, data.data(), data.size(), 0);
+        if (!src) {
+            zip_discard(raw);
+            throw ReportException(ReportError::CantCopyDocxTemplate,
+                                  fmt::format("zip_source_buffer failed for {}", name));
+        }
+        if (zip_file_add(raw, name.c_str(), src, ZIP_FL_OVERWRITE | ZIP_FL_ENC_UTF_8) < 0) {
+            zip_source_free(src);
+            zip_discard(raw);
+            throw ReportException(ReportError::CantCopyDocxTemplate,
+                                  fmt::format("zip_file_add({}) failed for embedded workbook", name));
+        }
+    }
+    if (zip_close(raw) != 0) {
+        throw ReportException(ReportError::CantCopyDocxTemplate,
+                              "zip_close failed for embedded workbook");
+    }
+    std::ifstream f(tmp.path(), std::ios::binary);
+    std::ostringstream oss;
+    oss << f.rdbuf();
+    return oss.str();
+}
+
+// Archive part name of the .xlsx linked from `chart_part` via
+// <c:externalData r:id="..."/>, resolved through the chart's own
+// "_rels/<basename>.rels" sibling. Returns "" when the chart has no
+// external data at all (a template with no embedded workbook — the common
+// case, and not an error).
+std::string resolve_chart_external_data(
+    const std::unordered_map<std::string, std::string>& parts,
+    pugi::xml_node chart_space,
+    const std::string& chart_part)
+{
+    auto ext = chart_space.child("c:externalData");
+    if (!ext) return {};
+    const std::string rid = ext.attribute("r:id").value();
+    if (rid.empty()) return {};
+
+    const auto slash = chart_part.find_last_of('/');
+    const std::string dir  = (slash == std::string::npos) ? "" : chart_part.substr(0, slash + 1);
+    const std::string base = (slash == std::string::npos) ? chart_part : chart_part.substr(slash + 1);
+    const std::string rels_part = dir + "_rels/" + base + ".rels";
+
+    auto rels_it = parts.find(rels_part);
+    if (rels_it == parts.end()) return {};
+    const std::string target = resolve_doc_rid(rels_it->second, rid);
+    if (target.empty()) return {};
+
+    return (std::filesystem::path(dir) / target).lexically_normal().generic_string();
+}
+
+// Within an already-unzipped embedded workbook, resolve the worksheet part
+// backing `sheet_name` (as declared in xl/workbook.xml). Falls back to the
+// first xl/worksheets/*.xml part found when the name can't be resolved —
+// an embedded chart workbook is effectively always single-sheet, so this
+// is a safety net, not the primary path.
+std::string resolve_workbook_sheet_part(
+    const std::unordered_map<std::string, std::string>& wb_parts,
+    const std::string& sheet_name)
+{
+    auto wb_it   = wb_parts.find("xl/workbook.xml");
+    auto rels_it = wb_parts.find("xl/_rels/workbook.xml.rels");
+    if (wb_it != wb_parts.end() && rels_it != wb_parts.end() && !sheet_name.empty()) {
+        pugi::xml_document wb_doc;
+        if (wb_doc.load_buffer(wb_it->second.data(), wb_it->second.size())) {
+            for (auto sheet : wb_doc.child("workbook").child("sheets").children("sheet")) {
+                if (sheet_name != sheet.attribute("name").value()) continue;
+                const std::string rid = sheet.attribute("r:id").value();
+                if (rid.empty()) continue;
+                const std::string target = resolve_doc_rid(rels_it->second, rid);
+                if (target.empty()) continue;
+                return (std::filesystem::path("xl") / target).lexically_normal().generic_string();
+            }
+        }
+    }
+    std::vector<std::string> candidates;
+    for (const auto& [name, _] : wb_parts) {
+        if (name.rfind("xl/worksheets/", 0) == 0 &&
+            name.size() > 4 && name.compare(name.size() - 4, 4, ".xml") == 0) {
+            candidates.push_back(name);
+        }
+    }
+    if (candidates.empty()) return {};
+    std::sort(candidates.begin(), candidates.end());
+    return candidates.front();
+}
+
+// Full worksheet XML for a categories × series grid, using inline strings
+// (<c t="inlineStr">) for every text cell so there's no shared-strings
+// table (xl/sharedStrings.xml) to keep in sync on top of the sheet itself.
+// Column A holds categories; B, C, ... hold one series each, in order. Row
+// 1 is the series-name header row that the chart's <c:tx> ranges point at.
+std::string build_worksheet_xml(
+    const std::vector<std::string>& categories,
+    const std::vector<IReportMerger::ChartSeries>& series)
+{
+    const std::string dim_ref =
+        fmt::format("A1:{}{}", column_letter(series.size()), categories.size() + 1);
+
+    pugi::xml_document doc;
+    auto decl = doc.append_child(pugi::node_declaration);
+    decl.append_attribute("version")    = "1.0";
+    decl.append_attribute("encoding")   = "UTF-8";
+    decl.append_attribute("standalone") = "yes";
+
+    auto ws = doc.append_child("worksheet");
+    ws.append_attribute("xmlns") =
+        "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    ws.append_child("dimension").append_attribute("ref") = dim_ref.c_str();
+    ws.append_child("sheetViews").append_child("sheetView").append_attribute("workbookViewId") = 0;
+    ws.append_child("sheetFormatPr").append_attribute("defaultRowHeight") = 15.0;
+    auto sheet_data = ws.append_child("sheetData");
+
+    auto inline_str = [](pugi::xml_node row, const std::string& ref, const std::string& text) {
+        auto c = row.append_child("c");
+        c.append_attribute("r") = ref.c_str();
+        c.append_attribute("t") = "inlineStr";
+        c.append_child("is").append_child("t").text().set(text.c_str());
+    };
+    auto number = [](pugi::xml_node row, const std::string& ref, double value) {
+        auto c = row.append_child("c");
+        c.append_attribute("r") = ref.c_str();
+        std::ostringstream ss;
+        ss.imbue(std::locale::classic());
+        ss << value;
+        c.append_child("v").text().set(ss.str().c_str());
+    };
+
+    auto header_row = sheet_data.append_child("row");
+    header_row.append_attribute("r") = 1;
+    for (std::size_t s = 0; s < series.size(); ++s) {
+        inline_str(header_row, fmt::format("{}1", column_letter(s + 1)), series[s].name);
+    }
+
+    for (std::size_t i = 0; i < categories.size(); ++i) {
+        const auto row_num = static_cast<unsigned>(i + 2);
+        auto row = sheet_data.append_child("row");
+        row.append_attribute("r") = row_num;
+        inline_str(row, fmt::format("A{}", row_num), categories[i]);
+        for (std::size_t s = 0; s < series.size(); ++s) {
+            number(row, fmt::format("{}{}", column_letter(s + 1), row_num), series[s].values[i]);
+        }
+    }
+
+    std::ostringstream oss;
+    doc.save(oss, "", pugi::format_raw);
+    return oss.str();
+}
+
+} // namespace
+
+void DocxMerger::setChartSeriesName(const std::string& bookmark,
+                                    const std::string& old_name,
+                                    const std::string& new_name)
+{
+    if (!loaded_) {
+        throw ReportException(ReportError::CantOpenTemplate,
+                              "setChartSeriesName before load()");
+    }
+
+    const std::string chart_part = locate_chart_part(bookmark);
+    auto chart_it = parts_.find(chart_part);
+
+    pugi::xml_document chart_doc;
+    if (!chart_doc.load_buffer(chart_it->second.data(), chart_it->second.size())) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            fmt::format("chart part is not valid XML: {}", chart_part));
+    }
+    auto plot_area = chart_doc.child("c:chartSpace").child("c:chart").child("c:plotArea");
+    if (!plot_area) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            "chart has no <c:plotArea>");
+    }
+
+    bool saw_unsupported = false;
+    for (auto type_node : plot_area.children()) {
+        const std::string_view tag = type_node.name();
+        if (is_unsupported_xy_chart(tag)) {
+            saw_unsupported = true;
+            continue;
+        }
+        if (!is_supported_chart_type(tag)) continue;
+
+        for (auto ser : type_node.children("c:ser")) {
+            if (read_series_name(ser) != old_name) continue;
+
+            write_series_name(ser, new_name);
+
+            std::ostringstream oss;
+            chart_doc.save(oss, "", pugi::format_raw);
+            parts_[chart_part] = oss.str();
+            return;
+        }
+    }
+
+    if (saw_unsupported) {
+        throw ReportException(
+            ReportError::NotImplemented,
+            "chart uses scatter/bubble/stock/surface plot — setChartSeriesName only "
+            "supports cat/val shapes (bar/line/pie/area/radar/doughnut/3D variants)");
+    }
+    throw ReportException(
+        ReportError::InvalidField,
+        fmt::format("series '{}' not found in chart '{}'", old_name, chart_part));
+}
+
+void DocxMerger::setChartTitle(const std::string& bookmark, const std::string& title) {
+    if (!loaded_) {
+        throw ReportException(ReportError::CantOpenTemplate,
+                              "setChartTitle before load()");
+    }
+
+    const std::string chart_part = locate_chart_part(bookmark);
+    auto chart_it = parts_.find(chart_part);
+
+    pugi::xml_document chart_doc;
+    if (!chart_doc.load_buffer(chart_it->second.data(), chart_it->second.size())) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            fmt::format("chart part is not valid XML: {}", chart_part));
+    }
+    auto chart_node = chart_doc.child("c:chartSpace").child("c:chart");
+    auto plot_area  = chart_node.child("c:plotArea");
+    if (!plot_area) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            "chart has no <c:plotArea>");
+    }
+
+    bool saw_unsupported = false;
+    if (!has_supported_chart_type(plot_area, saw_unsupported) && saw_unsupported) {
+        throw ReportException(
+            ReportError::NotImplemented,
+            "chart uses scatter/bubble/stock/surface plot — setChartTitle only "
+            "supports cat/val shapes (bar/line/pie/area/radar/doughnut/3D variants)");
+    }
+
+    auto atd_node = chart_node.child("c:autoTitleDeleted");
+    set_title(chart_node, atd_node ? atd_node : plot_area, title);
+    if (!atd_node) atd_node = chart_node.insert_child_before("c:autoTitleDeleted", plot_area);
+    if (auto v = atd_node.attribute("val")) v.set_value("0");
+    else atd_node.append_attribute("val") = "0";
+
+    std::ostringstream oss;
+    chart_doc.save(oss, "", pugi::format_raw);
+    parts_[chart_part] = oss.str();
+}
+
+void DocxMerger::setChartAxisTitle(const std::string& bookmark,
+                                   ChartAxis           axis,
+                                   const std::string&  title)
+{
+    if (!loaded_) {
+        throw ReportException(ReportError::CantOpenTemplate,
+                              "setChartAxisTitle before load()");
+    }
+
+    const std::string chart_part = locate_chart_part(bookmark);
+    auto chart_it = parts_.find(chart_part);
+
+    pugi::xml_document chart_doc;
+    if (!chart_doc.load_buffer(chart_it->second.data(), chart_it->second.size())) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            fmt::format("chart part is not valid XML: {}", chart_part));
+    }
+    auto plot_area = chart_doc.child("c:chartSpace").child("c:chart").child("c:plotArea");
+    if (!plot_area) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            "chart has no <c:plotArea>");
+    }
+
+    bool saw_unsupported = false;
+    if (!has_supported_chart_type(plot_area, saw_unsupported) && saw_unsupported) {
+        throw ReportException(
+            ReportError::NotImplemented,
+            "chart uses scatter/bubble/stock/surface plot — setChartAxisTitle only "
+            "supports cat/val shapes (bar/line/pie/area/radar/doughnut/3D variants)");
+    }
+
+    const char* axis_tag = (axis == ChartAxis::Category) ? "c:catAx" : "c:valAx";
+    auto ax = plot_area.child(axis_tag);
+    if (!ax) {
+        throw ReportException(
+            ReportError::InvalidField,
+            fmt::format("chart has no {} to set a title on", axis_tag));
+    }
+    set_title(ax, axis_title_anchor(ax), title);
+
+    std::ostringstream oss;
+    chart_doc.save(oss, "", pugi::format_raw);
+    parts_[chart_part] = oss.str();
+}
+
+void DocxMerger::setChartData(const std::string&              bookmark,
+                              const std::vector<std::string>&  categories,
+                              const std::vector<ChartSeries>&  series)
+{
+    if (!loaded_) {
+        throw ReportException(ReportError::CantOpenTemplate,
+                              "setChartData before load()");
+    }
+    if (categories.empty()) {
+        throw ReportException(ReportError::InvalidField,
+                              "setChartData: categories must not be empty");
+    }
+    if (series.empty()) {
+        throw ReportException(ReportError::InvalidField,
+                              "setChartData: series must not be empty");
+    }
+    for (const auto& s : series) {
+        if (s.values.size() != categories.size()) {
+            throw ReportException(
+                ReportError::InvalidField,
+                fmt::format("setChartData: series '{}' has {} value(s), expected {} "
+                            "(one per category)",
+                            s.name, s.values.size(), categories.size()));
+        }
+    }
+
+    const std::string chart_part = locate_chart_part(bookmark);
+    auto chart_it = parts_.find(chart_part);
+
+    pugi::xml_document chart_doc;
+    if (!chart_doc.load_buffer(chart_it->second.data(), chart_it->second.size())) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            fmt::format("chart part is not valid XML: {}", chart_part));
+    }
+    auto chart_space = chart_doc.child("c:chartSpace");
+    auto plot_area    = chart_space.child("c:chart").child("c:plotArea");
+    if (!plot_area) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            "chart has no <c:plotArea>");
+    }
+
+    pugi::xml_node type_node;
+    bool saw_unsupported = false;
+    for (auto candidate : plot_area.children()) {
+        const std::string_view tag = candidate.name();
+        if (is_unsupported_xy_chart(tag)) {
+            saw_unsupported = true;
+            continue;
+        }
+        if (is_supported_chart_type(tag)) {
+            type_node = candidate;
+            break;
+        }
+    }
+    if (!type_node) {
+        if (saw_unsupported) {
+            throw ReportException(
+                ReportError::NotImplemented,
+                "chart uses scatter/bubble/stock/surface plot — setChartData only "
+                "supports cat/val shapes (bar/line/pie/area/radar/doughnut/3D variants)");
+        }
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            "chart has no recognised series container");
+    }
+
+    std::vector<pugi::xml_node> template_sers;
+    for (auto ser : type_node.children("c:ser")) template_sers.push_back(ser);
+    if (template_sers.empty()) {
+        throw ReportException(
+            ReportError::CantCopyDocxTemplate,
+            "chart has zero template <c:ser> to clone visual style from");
+    }
+
+    // Capture the sheet name from an existing series' range before any
+    // rewriting, so the new ranges (and the embedded workbook sync below)
+    // stay on the same worksheet the template author picked.
+    std::string sheet_name = "Sheet1";
+    {
+        auto cat = template_sers.front().child("c:cat");
+        std::string f = cat.child("c:strRef").child("c:f").child_value();
+        if (f.empty()) f = cat.child("c:numRef").child("c:f").child_value();
+        const auto parsed = sheet_name_from_formula(f);
+        if (!parsed.empty()) sheet_name = parsed;
+    }
+
+    // Reconcile the template's series with `series`: reuse existing <c:ser>
+    // nodes (and their <c:spPr> styling) in template order, clone the last
+    // template series' style for any extra requested series, and drop any
+    // surplus template series. Existing <c:dPt> per-point color overrides
+    // are left as-is — they reference specific point indices and aren't
+    // regenerated for a reshaped category axis (a documented gap, not a
+    // silent corruption: consumers ignore a <c:dPt> whose idx has no
+    // matching point).
+    while (template_sers.size() < series.size()) {
+        auto clone = type_node.insert_copy_after(template_sers.back(), template_sers.back());
+        template_sers.push_back(clone);
+    }
+    while (template_sers.size() > series.size()) {
+        type_node.remove_child(template_sers.back());
+        template_sers.pop_back();
+    }
+
+    const std::string cat_range =
+        fmt::format("{}!$A$2:$A${}", sheet_name, categories.size() + 1);
+
+    for (std::size_t s = 0; s < series.size(); ++s) {
+        pugi::xml_node ser = template_sers[s];
+
+        if (auto idx = ser.child("c:idx")) {
+            idx.attribute("val").set_value(static_cast<unsigned>(s));
+        } else {
+            ser.prepend_child("c:idx").append_attribute("val") = static_cast<unsigned>(s);
+        }
+        if (auto ord = ser.child("c:order")) {
+            ord.attribute("val").set_value(static_cast<unsigned>(s));
+        } else {
+            ser.insert_child_after("c:order", ser.child("c:idx")).append_attribute("val") =
+                static_cast<unsigned>(s);
+        }
+
+        const std::string col       = column_letter(s + 1);
+        const std::string name_ref  = fmt::format("{}!${}$1", sheet_name, col);
+        const std::string val_range = fmt::format("{}!${}$2:${}${}",
+                                                   sheet_name, col, col, categories.size() + 1);
+
+        write_series_name(ser, series[s].name);
+        if (auto f = ser.child("c:tx").child("c:strRef").child("c:f")) f.text().set(name_ref.c_str());
+
+        rewrite_string_cache(ser.child("c:cat"), cat_range, categories);
+        rewrite_numeric_cache(ser.child("c:val"), val_range, series[s].values);
+    }
+
+    std::ostringstream oss;
+    chart_doc.save(oss, "", pugi::format_raw);
+    parts_[chart_part] = oss.str();
+
+    // ── Sync the embedded workbook, if this chart carries one ──
+    const std::string xlsx_part = resolve_chart_external_data(parts_, chart_space, chart_part);
+    if (!xlsx_part.empty()) {
+        auto xlsx_it = parts_.find(xlsx_part);
+        if (xlsx_it == parts_.end()) {
+            throw ReportException(
+                ReportError::CantCopyDocxTemplate,
+                fmt::format("chart references embedded workbook not in archive: {}", xlsx_part));
+        }
+        auto wb_parts = read_nested_zip(xlsx_it->second);
+        const std::string sheet_part = resolve_workbook_sheet_part(wb_parts, sheet_name);
+        if (sheet_part.empty()) {
+            throw ReportException(
+                ReportError::CantCopyDocxTemplate,
+                fmt::format("embedded workbook '{}' has no worksheet part", xlsx_part));
+        }
+        wb_parts[sheet_part] = build_worksheet_xml(categories, series);
+        parts_[xlsx_part] = write_nested_zip(wb_parts);
+    }
 }
 
 // ── paste ───────────────────────────────────────────────────────────────────

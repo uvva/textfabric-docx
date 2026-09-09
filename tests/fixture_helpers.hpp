@@ -52,6 +52,15 @@ struct ChartFixture {
 void write_chart_template_docx(const std::filesystem::path& out,
                                const ChartFixture&          fx = {});
 
+/// Same as write_chart_template_docx, but also embeds a minimal .xlsx
+/// workbook at word/embeddings/Microsoft_Excel_Worksheet1.xlsx, wired up
+/// via a <c:externalData> relationship on the chart part (chart1.xml.rels)
+/// — the shape setChartData's embedded-workbook sync path looks for. The
+/// workbook's Sheet1 seeds A1:C3 with fx's default categories/series so a
+/// test can assert on either the pre- or post-setChartData content.
+void write_chart_template_docx_with_workbook(const std::filesystem::path& out,
+                                             const ChartFixture&          fx = {});
+
 /// A valid 2×2 RGB PNG (75 bytes, colours: red/green/blue/white).
 /// Generated once by hand-crafting IHDR + IDAT + IEND chunks with correct
 /// CRCs; embedded here so tests remain self-contained (no binary fixtures
