@@ -27,6 +27,22 @@
 #  include <tiffio.h>
 #endif
 
+// ── Native-crash containment (Windows only) ──────────────────────────────
+// stb_image and libtiff are third-party C decoders; malformed/corrupt input
+// has been observed (via user crash dumps, not local repro — see
+// TEXTFABRIC_UPSTREAM_FEEDBACK.md item 10) to trigger a genuine hardware
+// exception (EXCEPTION_ACCESS_VIOLATION deep in stb_image's Huffman
+// decoding) rather than a clean decode failure. That bypasses every
+// try/catch a caller might have — it's a process-killing SEH, not a C++
+// exception. _set_se_translator lets us convert it into a normal,
+// catchable ReportException instead. This requires this translation unit
+// to be compiled with /EHa (see CMakeLists.txt) — without it the CRT never
+// invokes the translator and the hardware exception still kills the
+// process.
+#if defined(_MSC_VER)
+#  include <eh.h>
+#endif
+
 namespace textfabric::docx {
 
 namespace {
@@ -272,10 +288,40 @@ PngBuffer decode_via_libtiff(const std::string& bytes) {
                     path.string(), fmt, needed));
 }
 
+#if defined(_MSC_VER)
+// Signature fixed by _se_translator_function; must not be [[noreturn]] or
+// otherwise altered, or _set_se_translator won't accept it.
+void seh_to_report_exception(unsigned int code, struct _EXCEPTION_POINTERS*) {
+    throw ReportException(
+        ReportError::CantCopyDocxTemplate,
+        fmt::format("native exception 0x{:08X} while decoding image data — "
+                    "the file is likely corrupt or malformed", code));
+}
+
+// RAII-scoped so only the decode call below runs under the translator, not
+// the rest of the process — _set_se_translator is a per-thread global.
+class ScopedSehTranslator {
+public:
+    ScopedSehTranslator()
+        : prev_(_set_se_translator(&seh_to_report_exception)) {}
+    ~ScopedSehTranslator() { _set_se_translator(prev_); }
+    ScopedSehTranslator(const ScopedSehTranslator&) = delete;
+    ScopedSehTranslator& operator=(const ScopedSehTranslator&) = delete;
+private:
+    _se_translator_function prev_;
+};
+#endif // _MSC_VER
+
 } // namespace
 
 PngBuffer load_as_png(const std::filesystem::path& path) {
     std::string bytes = slurp(path);
+
+#if defined(_MSC_VER)
+    // Guards the stb_image / libtiff decode calls below — see the
+    // "Native-crash containment" comment near the top of this file.
+    ScopedSehTranslator seh_guard;
+#endif
 
     if (starts_with(bytes, kPngSignature)) {
         PngBuffer buf;

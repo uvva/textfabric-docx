@@ -60,6 +60,18 @@ endif()
 
 add_library(TextFabric::textfabric ALIAS textfabric)
 
+# stb_image / libtiff are third-party C decoders that have crashed (not
+# thrown) on malformed/corrupt input in the field — a hardware exception
+# (e.g. access violation), not a catchable ReportException. /EHa switches
+# image.cpp to the asynchronous exception model so _set_se_translator()
+# (see src/docx/image.cpp) can actually intercept that and rethrow it as a
+# normal C++ exception instead of letting it kill the process. Scoped to
+# this one file; nothing else needs the (slower) async model. No-op on
+# non-MSVC compilers, which don't recognize /EHa as a flag they own here.
+if(MSVC)
+    set_source_files_properties(src/docx/image.cpp PROPERTIES COMPILE_OPTIONS /EHa)
+endif()
+
 target_sources(textfabric
     PRIVATE
         src/textfabric.cpp
@@ -214,8 +226,17 @@ include(CMakePackageConfigHelpers)
 # On Linux/macOS we keep this off: CMake's default POST_EXCLUDE filters system
 # paths, but for our Nix path the transitive .so set is provided by the
 # consumer's environment, not by our prefix.
+#
+# Under vcpkg (VCPKG_TOOLCHAIN is set by its toolchain file) this must stay
+# off entirely, not just be redirected: vcpkg already installs fmt/pugixml/
+# libzip/tiff's DLLs into the shared installed/<triplet>/(debug/)bin pool
+# that consumers read from directly. Pointing DIRECTORIES at that pool makes
+# RUNTIME_DEPENDENCIES copy second copies of those DLLs into our own install
+# tree, which vcpkg's post-build validation then rejects as "already
+# installed by <port>" ownership conflicts. There's no "resolve but don't
+# copy" flag, so not entering this block is the only correct fix.
 set(_tf_runtime_deps "")
-if(WIN32 AND TEXTFABRIC_BUILD_SHARED)
+if(WIN32 AND TEXTFABRIC_BUILD_SHARED AND NOT VCPKG_TOOLCHAIN)
     set(_tf_runtime_deps
         RUNTIME_DEPENDENCIES
             PRE_EXCLUDE_REGEXES  "api-ms-.*" "ext-ms-.*"

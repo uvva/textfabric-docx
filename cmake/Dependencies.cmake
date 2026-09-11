@@ -198,9 +198,17 @@ if(Stb_FOUND AND DEFINED Stb_INCLUDE_DIR)
     message(STATUS "  [dep] stb: found via find_package (${Stb_INCLUDE_DIR})")
 elseif(TEXTFABRIC_USE_FETCHCONTENT)
     message(STATUS "  [dep] stb: NOT found — fetching nothings/stb")
+    # Pinned, not "master": nothings/stb has no release tags, and stb_image.h's
+    # JPEG decoder is exactly the kind of unmanaged-memory C parser where an
+    # unpinned "always latest" dependency means nobody can say which version
+    # actually shipped when a crash is reported (see
+    # TEXTFABRIC_UPSTREAM_FEEDBACK.md item 10). Every other FetchContent dep
+    # above is pinned to an exact tag; this was the one exception.
+    # Commit below is nothings/stb@master as of 2026-09-11 — bump deliberately,
+    # not by drifting.
     FetchContent_Declare(stb
         GIT_REPOSITORY https://github.com/nothings/stb.git
-        GIT_TAG        master
+        GIT_TAG        2c980bb59875b0d32144a71867fbdebb2f77cd20
         GIT_SHALLOW    TRUE
     )
     FetchContent_GetProperties(stb)
