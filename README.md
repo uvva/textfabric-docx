@@ -8,7 +8,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="C++ standard" src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=c%2B%2B&logoColor=white">
-  <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey">
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey">
   <img alt="Tests" src="https://img.shields.io/badge/tests-69%2F69%20passing-brightgreen">
 </p>
 
