@@ -1,24 +1,46 @@
-# TextFabric
+<p align="center">
+  <img src="assets/logo.png" alt="TextFabric logo" width="140">
+</p>
 
-Кросс-платформенная C++20-библиотека для заполнения DOCX-шаблонов: подстановка текста, клонирование строк таблиц, обновление встроенных диаграмм и вставка изображений — по именованным закладкам Word, без промежуточных форматов. Опционально конвертирует результат в PDF/HTML через Microsoft Word или LibreOffice.
+<h1 align="center">TextFabric</h1>
+<p align="center"><b>Fill Word templates by bookmark name — no template engine, no intermediate format.</b></p>
 
-**Подтверждённые платформы (v0.1.0):** Linux x86_64 (GCC + Nix) — `ctest` **69/69 ✅**, включая графики, работу с изображениями (PNG/JPEG/BMP/TIFF), PDF/HTML-конвертеры и 3 integration-теста с `find_package(TextFabric)` из install-префикса. Windows x64 (MSVC 2022 + vcpkg) — собирается и проходит основной набор тестов; ветки JPEG/BMP/TIFF ждут отдельного прогона на Windows-хосте. Windows x86 и macOS — CMake-presets готовы, не прогонялись.
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="C++ standard" src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=c%2B%2B&logoColor=white">
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-69%2F69%20passing-brightgreen">
+</p>
 
-## Содержание
+Cross-platform C++20 library for filling DOCX templates: text substitution, table row cloning, embedded chart updates, and image insertion — all addressed by named Word bookmarks, with no intermediate format. Optionally converts the result to PDF/HTML via Microsoft Word or LibreOffice.
 
-- [Быстрый старт](#быстрый-старт)
-- [Авторинг шаблона `.docx`](#авторинг-шаблона-docx)
+**Confirmed platforms (v0.1.0):** Linux x86_64 (GCC + Nix) — `ctest` **69/69 ✅**, covering charts, image handling (PNG/JPEG/BMP/TIFF), the PDF/HTML converters, and 3 integration tests against `find_package(TextFabric)` from an install prefix. Windows x64 (MSVC 2022 + vcpkg) — builds and passes the core suite; the JPEG/BMP/TIFF branches are still waiting on a dedicated Windows-host run. Windows x86 and macOS — CMake presets are ready, untested.
+
+## Features
+
+- 🔖 **Bookmark-addressed substitution** — target any named Word bookmark; no custom templating syntax beyond a plain `{{token}}` or `kNAME` placeholder
+- 📊 **Table row cloning** — one template `<w:tr>` in, N filled rows out
+- 📈 **Chart updates** — rewrite data points in embedded bar/line/pie/area/doughnut/radar/3D charts
+- 🖼️ **Image insertion** — PNG passes through untouched, JPEG/BMP/TIFF are transcoded on the fly, with aspect-ratio-preserving size bounds
+- 📄 **PDF/HTML export** — routed through Microsoft Word or LibreOffice, no conversion pipeline to wire up yourself
+- 🌍 **UTF-8 throughout** — Cyrillic, CJK, whatever your template contains (the Cyrillic names in the example below aren't a typo — they're there to prove it)
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Authoring a `.docx` Template](#authoring-a-docx-template)
 - [API](#api)
-- [Полный пример](#полный-пример)
-- [Runtime-зависимости](#runtime-зависимости)
-- [Коды ошибок](#коды-ошибок)
-- [Лицензия](#лицензия)
+- [Full Example](#full-example)
+- [Runtime Dependencies](#runtime-dependencies)
+- [Error Codes](#error-codes)
+- [Build Dependencies](#build-dependencies)
+- [License](#license)
 
 ---
 
-## Быстрый старт
+## Quick Start
 
-Сборка из репозитория:
+Building from the repository:
 
 ```bash
 # Linux (Nix dev shell):
@@ -27,26 +49,26 @@ cmake --preset linux-x64
 cmake --build --preset linux-x64
 ctest --preset linux-x64
 
-# Windows (MSVC 2022 + vcpkg) — подробно в docs/build-windows.md:
+# Windows (MSVC 2022 + vcpkg) — full walkthrough in docs/build-windows.md:
 cmake --preset win-x64-vcpkg
 cmake --build --preset win-x64-vcpkg
 ctest   --preset win-x64-vcpkg
 ```
 
-Подключение в чужом CMake-проекте:
+Consuming from another CMake project:
 
 ```cmake
 find_package(TextFabric 0.1 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE TextFabric::textfabric)
 ```
 
-Или через vcpkg-манифест (`vcpkg.json`):
+Or via a vcpkg manifest (`vcpkg.json`):
 
 ```json
 { "dependencies": ["textfabric"] }
 ```
 
-Минимальный вызов:
+Minimal call:
 
 ```cpp
 #include <textfabric/merger.hpp>
@@ -60,34 +82,34 @@ m->save("report.docx");
 
 ---
 
-## Авторинг шаблона `.docx`
+## Authoring a `.docx` Template
 
-Шаблон — обычный DOCX, созданный в MS Word или LibreOffice Writer. Никакого промежуточного формата не требуется.
+The template is a plain DOCX authored in MS Word or LibreOffice Writer — no intermediate format required.
 
-### 1. Закладки (`<w:bookmarkStart w:name="..."/>`)
+### 1. Bookmarks (`<w:bookmarkStart w:name="..."/>`)
 
-Все запросы адресуются **по имени закладки Word**. Вставьте закладку поверх текста, который должен быть заменён (Word: *Insert → Bookmark → Add*).
+Every request is addressed **by Word bookmark name**. Drop a bookmark over the text that should be replaced (Word: *Insert → Bookmark → Add*).
 
-| Тип закладки | Назначение | Пример |
+| Bookmark type | Purpose | Example |
 |---|---|---|
-| `_Header` / `_Footer` | **Псевдо-закладки**, зарезервированные под `word/header*.xml` / `word/footer*.xml`. Реальной `<w:bookmarkStart>` не требуется и не ищется — движок перебирает все части заголовка/футера в архиве и подставляет `value` в первую, где встретится `field`. Удобно, когда заголовок/футер шаблона содержит текстовые плейсхолдеры без закладок. | `setClipboardValue("_Header", "{User}", "Alice")` |
-| Обычная закладка | Любое имя внутри `word/document.xml`, например `Body.*` | `Body.Greeting`, `Body.Scores` |
+| `_Header` / `_Footer` | **Pseudo-bookmarks**, reserved for `word/header*.xml` / `word/footer*.xml`. No real `<w:bookmarkStart>` is required or looked up — the engine walks every header/footer part in the archive and substitutes `value` into the first one where `field` occurs. Handy when the template's header/footer holds bare text placeholders with no bookmarks. | `setClipboardValue("_Header", "{User}", "Alice")` |
+| Regular bookmark | Any name inside `word/document.xml`, e.g. `Body.*` | `Body.Greeting`, `Body.Scores` |
 
-### 2. Плейсхолдеры
+### 2. Placeholders
 
-Внутри закладки размещайте токены вида `{{name}}` либо `kNAME`. Библиотека ищет **первое вхождение** токена в склеенном тексте закладки и заменяет его; форматирование первого рана (`<w:rPr>`: шрифт, жирный, кегль) сохраняется.
+Inside a bookmark, place tokens like `{{name}}` or `kNAME`. The library finds the **first occurrence** of the token in the bookmark's concatenated text and replaces it; the first run's formatting (`<w:rPr>`: font, bold, size) is preserved.
 
-Токен может быть разорван на несколько `<w:r>`/`<w:t>` (частый артефакт редактирования в Word) — движок корректно склеит текст и очистит «хвостовые» `<w:t>`.
+A token may be split across several `<w:r>`/`<w:t>` elements (a common artifact of editing in Word) — the engine correctly re-joins the text and cleans up the trailing `<w:t>` fragments.
 
-### 3. Таблицы
+### 3. Tables
 
-Для динамически клонируемых строк:
+For dynamically cloned rows:
 
-1. Нарисуйте таблицу: одна **заголовочная** строка (не трогается) + одна **шаблонная** строка.
-2. В шаблонной строке поставьте **одну закладку**, перекрывающую всю строку (от первой ячейки до последней).
-3. В ячейках — **уникальный плейсхолдер на ячейку** (`{{col1}}`, `{{col2}}`, …).
+1. Draw a table: one **header** row (left untouched) + one **template** row.
+2. Put **a single bookmark** on the template row, spanning it from the first cell to the last.
+3. Give each cell a **unique placeholder** (`{{col1}}`, `{{col2}}`, …).
 
-Пример фрагмента `word/document.xml`:
+Example fragment of `word/document.xml`:
 
 ```xml
 <w:tr>  <!-- template row -->
@@ -102,41 +124,41 @@ m->save("report.docx");
 </w:tr>
 ```
 
-Ограничения v1:
-- Вложенные таблицы не тестировались, но алгоритм клонирования их не ломает.
-- `<w:bookmarkStart>` в клонах автоматически удаляются, чтобы избежать дубликатов `w:id` (Word иначе откажется открывать документ).
+v1 limitations:
+- Nested tables haven't been tested, but the cloning algorithm doesn't break them.
+- `<w:bookmarkStart>` elements are stripped from clones automatically to avoid duplicate `w:id`s (Word would otherwise refuse to open the document).
 
-### 4. Картинки (`setImage`)
+### 4. Images (`setImage`)
 
-Закладка (например `Body.Logo`) должна располагаться **внутри одного `<w:p>`**; `setImage` удалит все `<w:r>` между `bookmarkStart`/`bookmarkEnd` и вставит `<w:r><w:drawing>…</w:drawing></w:r>` между ними. Плейсхолдер вроде `{{logo}}` замещается картинкой целиком.
+The bookmark (e.g. `Body.Logo`) must sit **inside a single `<w:p>`**; `setImage` removes every `<w:r>` between `bookmarkStart`/`bookmarkEnd` and inserts `<w:r><w:drawing>…</w:drawing></w:r>` in their place. A placeholder like `{{logo}}` is replaced by the image wholesale.
 
-Размер в документе (`<wp:extent cx cy>`) по умолчанию равен пиксельному размеру исходного файла при 96 DPI (9525 EMU/px). Через параметр `ImageSize{min_width_px, min_height_px, max_width_px, max_height_px}` можно задать bounds — крохотная иконка растянется до `min`, гигантская фотография сожмётся до `max`, aspect ratio сохраняется единым скаляром на обе оси. Конфликтующие bounds (например `min_width=400, max_height=200` на квадратной картинке) → `ReportError::InvalidField` **до** мутации архива — документ остаётся нетронутым.
+The on-page size (`<wp:extent cx cy>`) defaults to the source file's pixel dimensions at 96 DPI (9525 EMU/px). The `ImageSize{min_width_px, min_height_px, max_width_px, max_height_px}` parameter lets you set bounds — a tiny icon is upscaled to `min`, an oversized photo is downscaled to `max`, aspect ratio is preserved via a single scalar applied to both axes. Conflicting bounds (e.g. `min_width=400, max_height=200` on a square image) → `ReportError::InvalidField` **before** the archive is mutated, so the document is left untouched.
 
 ---
 
 ## API
 
-Полный заголовочный файл: [include/textfabric/merger.hpp](include/textfabric/merger.hpp). Фабрика `textfabric::make_docx_merger()` возвращает `std::unique_ptr<IReportMerger>`. Все строки — UTF-8.
+Full header: [include/textfabric/merger.hpp](include/textfabric/merger.hpp). The factory `textfabric::make_docx_merger()` returns `std::unique_ptr<IReportMerger>`. All strings are UTF-8.
 
-| Метод | Что делает |
+| Method | What it does |
 |---|---|
-| `setCodePage(cp)` | Устанавливает кодировку. v1 принимает только `"UTF-8"`, остальное → `NotImplemented`. |
-| `load(path)` | Читает `.docx`-архив, парсит `word/document.xml`. |
-| `save(path.docx)` | Round-trip `.docx`-архива. |
-| `save(path.pdf/html)` | Конвертация через внешний процесс (Microsoft Word или LibreOffice — см. [Runtime-зависимости](#runtime-зависимости)). `NoConverter`, если ни один не найден. |
-| `setClipboardValue(bookmark, field, value)` | Подставляет `value` на место `field` внутри `bookmark`. Поддержка split-run. `bookmark` = `"_Header"`/`"_Footer"` — особый случай: перебирает все `word/header*.xml`/`word/footer*.xml` части архива вместо поиска закладки. |
-| `hasBookmark(bookmark)` | Проверяет, есть ли в загруженном шаблоне закладка с таким именем. Возвращает `false` и для отсутствующей закладки, и для незагруженного шаблона — никогда не бросает исключение. Не резолвит псевдо-закладки `_Header`/`_Footer`. |
-| `clearBookmark(bookmark)` | Стирает текст плейсхолдера внутри закладки, оставляя её пустой — полезно, когда закладку решили не заполнять на этом прогоне. Не резолвит псевдо-закладки `_Header`/`_Footer`. |
-| `setTableRow(bookmark, fields, rows)` | Клонирует `<w:tr>`-шаблон по числу `rows`, подставляет `rows[i][j]` в ячейку с `fields[j]`, удаляет шаблонную строку. |
-| `paste(bookmark)` | Валидирует существование закладки, логирует активацию. В v1 — no-op, оставлен для будущей семантики «раскрытия секции». |
-| `setChartValue(bookmark, field, series, category, value)` | Переписывает `<c:val>/<c:numCache>/<c:pt idx="N">/<c:v>` для точки `(series, category)` в чарте, на который указывает `bookmark`. Поддерживает bar/line/pie/area/doughnut/radar/3D варианты. Scatter/bubble/stock/surface → `NotImplemented`. `field` принимается для симметрии API, в матчинге не используется. **Ограничение:** точечно обновляет только уже существующую пару `(series, category)` — не может добавить или убрать категорию/серию. Ось категорий и набор серий графика зафиксированы шаблоном; `category`, которой нет в шаблоне, даёт `InvalidField`. |
-| `setImage(bookmark, image_path, bounds={})` | Вставляет картинку в параграф закладки. PNG — как есть; JPEG/BMP — через stb_image; TIFF — через libtiff. Всё транскодируется в PNG перед вкладкой. Необязательный `ImageSize{min_w, min_h, max_w, max_h}` в пикселях клампит отображаемый размер с сохранением aspect ratio. |
+| `setCodePage(cp)` | Sets the encoding. v1 accepts only `"UTF-8"`; anything else → `NotImplemented`. |
+| `load(path)` | Reads the `.docx` archive, parses `word/document.xml`. |
+| `save(path.docx)` | Round-trips the `.docx` archive. |
+| `save(path.pdf/html)` | Conversion via an external process (Microsoft Word or LibreOffice — see [Runtime Dependencies](#runtime-dependencies)). `NoConverter` if neither is found. |
+| `setClipboardValue(bookmark, field, value)` | Substitutes `value` for `field` inside `bookmark`. Handles split runs. `bookmark` = `"_Header"`/`"_Footer"` is a special case: it walks every `word/header*.xml`/`word/footer*.xml` part in the archive instead of resolving a bookmark. |
+| `hasBookmark(bookmark)` | Checks whether the loaded template has a bookmark with that name. Returns `false` for both a missing bookmark and an unloaded template — never throws. Does not resolve the `_Header`/`_Footer` pseudo-bookmarks. |
+| `clearBookmark(bookmark)` | Wipes the placeholder text inside a bookmark, leaving it empty — useful when a bookmark is deliberately left unfilled on a given run. Does not resolve the `_Header`/`_Footer` pseudo-bookmarks. |
+| `setTableRow(bookmark, fields, rows)` | Clones the `<w:tr>` template once per entry in `rows`, substitutes `rows[i][j]` into the cell for `fields[j]`, then removes the template row. |
+| `paste(bookmark)` | Validates that the bookmark exists and logs the activation. A no-op in v1, kept for a future "expand section" semantic. |
+| `setChartValue(bookmark, field, series, category, value)` | Rewrites `<c:val>/<c:numCache>/<c:pt idx="N">/<c:v>` for the `(series, category)` point in the chart the bookmark points at. Supports bar/line/pie/area/doughnut/radar/3D variants. Scatter/bubble/stock/surface → `NotImplemented`. `field` is accepted for API symmetry but unused in matching. **Limitation:** only updates an already-existing `(series, category)` pair — it cannot add or remove a category or series. The chart's category axis and series set are fixed by the template; a `category` absent from the template raises `InvalidField`. |
+| `setImage(bookmark, image_path, bounds={})` | Inserts an image into the bookmark's paragraph. PNG passes through as-is; JPEG/BMP go through stb_image; TIFF goes through libtiff. Everything is transcoded to PNG before embedding. The optional `ImageSize{min_w, min_h, max_w, max_h}` (in pixels) clamps the displayed size while preserving aspect ratio. |
 
 ---
 
-## Полный пример
+## Full Example
 
-См. работающий код в [examples/basic_report.cpp](examples/basic_report.cpp) и шаблонную фабрику в [examples/generate_template.cpp](examples/generate_template.cpp). Сокращённый скелет:
+See working code in [examples/basic_report.cpp](examples/basic_report.cpp) and the template factory in [examples/generate_template.cpp](examples/generate_template.cpp). Abridged skeleton:
 
 ```cpp
 #include <textfabric/error.hpp>
@@ -147,7 +169,7 @@ try {
     m->setCodePage("UTF-8");
     m->load("template.docx");
 
-    // --- Header fields (пробегает word/header*.xml, закладка не нужна) ---
+    // --- Header fields (walks word/header*.xml, no bookmark needed) ---
     m->setClipboardValue("_Header", "{ReportName}", "Q1 2026 Summary");
     m->setClipboardValue("_Header", "{User}",       "Иван Петров");
     m->setClipboardValue("_Header", "{UKDate}",     "2026-04-22");
@@ -166,8 +188,8 @@ try {
         });
 
     // --- Image ---
-    // Без bounds → отображаемый размер = пиксельному. С bounds → aspect-
-    // preserving clamp (апскейлит крохотные иконки, даунскейлит большие фото).
+    // No bounds → displayed size = pixel size. With bounds → aspect-
+    // preserving clamp (upscales tiny icons, downscales large photos).
     m->setImage("Body.Logo", "logo.png",
                 textfabric::ImageSize{/*min*/64, 64, /*max*/512, 512});
 
@@ -181,62 +203,62 @@ catch (const textfabric::ReportException& e) {
 
 ---
 
-## Runtime-зависимости
+## Runtime Dependencies
 
-Для `load`, `save(".docx")`, `setClipboardValue`, `setTableRow`, `paste` и `setImage(PNG)` никаких внешних зависимостей нет — всё в самой библиотеке (PNG-парсер hand-rolled).
+`load`, `save(".docx")`, `setClipboardValue`, `setTableRow`, `paste`, and `setImage(PNG)` need no external dependencies — everything lives in the library itself (the PNG parser is hand-rolled).
 
-### Картинки (setImage)
+### Images (`setImage`)
 
-| Формат входа | Что происходит | Требуется |
+| Input format | What happens | Requires |
 |---|---|---|
-| **PNG** | Байты проходят насквозь, размеры читаются из IHDR-чанка | — (hand-rolled парсер в `src/docx/image.cpp`) |
-| **JPEG**, **BMP** | Декод в RGBA → re-encode в PNG → вкладка | `stb_image` + `stb_image_write` (vcpkg `stb` / FetchContent с github/nothings/stb). Без них — `NotImplemented`. |
-| **TIFF** | `libtiff TIFFClientOpen` → `TIFFReadRGBAImageOriented` → repack → PNG | `libtiff` (vcpkg `tiff` / nix `libtiff`). Без libtiff — `NotImplemented`. |
+| **PNG** | Bytes pass straight through, dimensions are read from the IHDR chunk | — (hand-rolled parser in `src/docx/image.cpp`) |
+| **JPEG**, **BMP** | Decoded to RGBA → re-encoded as PNG → embedded | `stb_image` + `stb_image_write` (vcpkg `stb` / FetchContent from github/nothings/stb). Without them → `NotImplemented`. |
+| **TIFF** | `TIFFClientOpen` → `TIFFReadRGBAImageOriented` → repack → PNG | `libtiff` (vcpkg `tiff` / nix `libtiff`). Without libtiff → `NotImplemented`. |
 
-Детект формата — по magic bytes входного файла, не по расширению. Архив всегда хранит только `word/media/image{N}.png` — в `[Content_Types].xml` ничего кроме `<Default Extension="png" ContentType="image/png"/>` на выходе не появляется.
+Format detection is by magic bytes on the input file, not by extension. The archive always stores `word/media/image{N}.png` — nothing but `<Default Extension="png" ContentType="image/png"/>` shows up in `[Content_Types].xml` on output.
 
-### PDF / HTML экспорт
+### PDF / HTML export
 
-`save("*.pdf")` / `save("*.html")` идёт через внешний конвертер. Приоритет детекта (сверху вниз):
+`save("*.pdf")` / `save("*.html")` goes through an external converter. Detection order, top to bottom:
 
-| Шаг | Что проверяем | Как |
+| Step | What's checked | How |
 |---|---|---|
-| 1 | **Microsoft Word** (Windows only) | `reg query HKCR\Word.Application` — есть ли COM-класс. Конвертация — через генерируемый в scratch-каталоге `.vbs` + `cscript //B //Nologo` → `Documents.Open` → `SaveAs2`. Запуск в headless-режиме (`word.Visible=False`, `word.DisplayAlerts=0`). |
-| 2 | **LibreOffice `soffice`** (все платформы) | `TEXTFABRIC_SOFFICE` env (абсолютный путь; пустое значение отключает эту ветку) → Windows `C:\Program Files[(x86)]\LibreOffice\program\soffice.exe` → PATH-probe (`soffice --version`). Конвертация — `soffice --headless --convert-to pdf/html --outdir <scratch> <input>`. |
-| — | если ни то, ни другое | `ReportError::NoConverter` с подсказкой «install Microsoft Word or LibreOffice». |
+| 1 | **Microsoft Word** (Windows only) | `reg query HKCR\Word.Application` — is the COM class registered. Conversion runs through a `.vbs` script generated in a scratch directory + `cscript //B //Nologo` → `Documents.Open` → `SaveAs2`, headless (`word.Visible=False`, `word.DisplayAlerts=0`). |
+| 2 | **LibreOffice `soffice`** (all platforms) | `TEXTFABRIC_SOFFICE` env var (absolute path; an empty value disables this branch) → Windows `C:\Program Files[(x86)]\LibreOffice\program\soffice.exe` → PATH probe (`soffice --version`). Conversion runs `soffice --headless --convert-to pdf/html --outdir <scratch> <input>`. |
+| — | if neither is found | `ReportError::NoConverter`, with a hint to "install Microsoft Word or LibreOffice". |
 
-Env-переменные:
+Environment variables:
 
-| Имя | Эффект |
+| Name | Effect |
 |---|---|
-| `TEXTFABRIC_DISABLE_CONVERTERS=1` | Мастер-выключатель. `find_converter` сразу возвращает None, `save("*.pdf")` → `NoConverter`. Нужен для тестов и force-fallback. |
-| `TEXTFABRIC_NO_MSWORD=1` | Windows-only. Пропускает ветку Word и сразу идёт в LibreOffice. Полезно когда Word установлен, но нужен LO-совместимый рендер. |
-| `TEXTFABRIC_SOFFICE=<path>` | Если задано непусто — использовать только этот бинарь как LibreOffice, без PATH/Program Files. Если задано пустое — полностью отключить LO-ветку (но Word остаётся, если доступен). |
+| `TEXTFABRIC_DISABLE_CONVERTERS=1` | Master switch. `find_converter` immediately returns None, `save("*.pdf")` → `NoConverter`. Used by tests and for forcing the fallback path. |
+| `TEXTFABRIC_NO_MSWORD=1` | Windows-only. Skips the Word branch and goes straight to LibreOffice. Useful when Word is installed but you need LibreOffice-compatible rendering. |
+| `TEXTFABRIC_SOFFICE=<path>` | If set non-empty — use only this binary as LibreOffice, skipping PATH/Program Files lookups. If set empty — disable the LibreOffice branch entirely (Word remains available if present). |
 
-Ветка MSWord — осознанный компромисс: на Windows-рабочих станциях с установленным Office она даёт рендер, идентичный тому, что пользователь видит в Word интерактивно, и не требует ставить LibreOffice рядом. Цена — возможное расхождение вывода между Windows (через Word) и Linux/macOS (через LibreOffice); для сценариев, где важен паритет рендера между платформами, используйте `TEXTFABRIC_NO_MSWORD=1` и деплойте LibreOffice везде.
+The MSWord branch is a deliberate trade-off: on Windows workstations with Office installed it produces output identical to what the user sees interactively in Word, without requiring LibreOffice alongside it. The cost is a possible rendering difference between Windows (via Word) and Linux/macOS (via LibreOffice); for scenarios where cross-platform rendering parity matters, set `TEXTFABRIC_NO_MSWORD=1` and deploy LibreOffice everywhere.
 
-## Коды ошибок
+## Error Codes
 
-Все исключения — [`textfabric::ReportException`](include/textfabric/error.hpp) с полем `code()` типа `ReportError`:
+Every exception is a [`textfabric::ReportException`](include/textfabric/error.hpp) carrying a `code()` of type `ReportError`:
 
-| Код | Когда бросается |
+| Code | Thrown when |
 |---|---|
-| `CantOpenTemplate`     | Файл не найден или не является zip-архивом |
-| `CantCopyDocxTemplate` | В архиве нет `word/document.xml` либо XML не парсится |
-| `InvalidBookmark`      | Закладка не найдена; либо `setTableRow` адресует закладку вне `<w:tr>` |
-| `InvalidField`         | Плейсхолдер отсутствует в закладке; либо `rows[i].size() != fields.size()` |
-| `SaveFailed`           | Неизвестное расширение на `save()` или ошибка записи zip |
-| `NoConverter`          | Ни Microsoft Word, ни LibreOffice не найдены при `save("*.pdf")` / `save("*.html")`. Починить: установить MS Word (Windows), установить LibreOffice, задать `TEXTFABRIC_SOFFICE=/abs/path/to/soffice`, или убрать `TEXTFABRIC_DISABLE_CONVERTERS`. |
-| `NotImplemented`       | Сценарий не поддержан текущей реализацией: `setCodePage(≠ "UTF-8")`; `setChartValue` на scatter/bubble/stock/surface графике; JPEG/BMP/TIFF в `setImage`, когда библиотека собрана без stb_image/libtiff. |
+| `CantOpenTemplate`     | The file doesn't exist or isn't a zip archive |
+| `CantCopyDocxTemplate` | The archive has no `word/document.xml`, or the XML fails to parse |
+| `InvalidBookmark`      | The bookmark wasn't found; or `setTableRow` targets a bookmark outside a `<w:tr>` |
+| `InvalidField`         | The placeholder is missing from the bookmark; or `rows[i].size() != fields.size()` |
+| `SaveFailed`           | An unrecognized extension was passed to `save()`, or the zip write failed |
+| `NoConverter`          | Neither Microsoft Word nor LibreOffice could be found for `save("*.pdf")` / `save("*.html")`. Fix: install MS Word (Windows), install LibreOffice, set `TEXTFABRIC_SOFFICE=/abs/path/to/soffice`, or unset `TEXTFABRIC_DISABLE_CONVERTERS`. |
+| `NotImplemented`       | The scenario isn't supported by the current implementation: `setCodePage(≠ "UTF-8")`; `setChartValue` on a scatter/bubble/stock/surface chart; JPEG/BMP/TIFF in `setImage` when the library was built without stb_image/libtiff. |
 
-`textfabric::to_string(ReportError)` возвращает имя кода — удобно для логов и пользовательских сообщений.
+`textfabric::to_string(ReportError)` returns the code's name — handy for logs and user-facing messages.
 
 ---
 
-## Зависимости сборки
+## Build Dependencies
 
-pugixml, libzip, nlohmann-json, fmt, inja, stb, libtiff — через vcpkg-манифест (Windows/macOS) или Nix flake (Linux). Подробности в [vcpkg.json](vcpkg.json) и [flake.nix](flake.nix). Тесты используют Catch2.
+pugixml, libzip, nlohmann-json, fmt, inja, stb, libtiff — via the vcpkg manifest (Windows/macOS) or the Nix flake (Linux). Details in [vcpkg.json](vcpkg.json) and [flake.nix](flake.nix). Tests use Catch2.
 
-## Лицензия
+## License
 
 [MIT](LICENSE).
